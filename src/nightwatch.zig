@@ -13,6 +13,8 @@ pub const EventType = enum {
     created,
     modified,
     deleted,
+    /// Only produced on macOS and Windows where the OS gives no pairing info.
+    /// On Linux, paired renames are emitted as a { "FW", "rename", from, to } message instead.
     renamed,
 };
 
@@ -23,6 +25,7 @@ const SpawnError = error{ OutOfMemory, ThespianSpawnFailed };
 /// Watch a path (file or directory) for changes. The caller will receive:
 ///   .{ "FW", "change", path, event_type }
 /// where event_type is a file_watcher.EventType tag string: "created", "modified", "deleted", "renamed"
+/// On Linux, paired renames produce: .{ "FW", "rename", from_path, to_path }
 pub fn watch(path: []const u8) FileWatcherError!void {
     return send(.{ "watch", path });
 }
@@ -120,17 +123,34 @@ const LinuxBackend = struct {
         }
     }
 
-    fn drain(self: *LinuxBackend, parent: tp.pid_ref) !void {
+    fn drain(self: *LinuxBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
             cookie: u32,
             len: u32,
         };
+
+        // A pending MOVED_FROM waiting to be paired with a MOVED_TO by cookie.
+        const PendingRename = struct {
+            cookie: u32,
+            path: []u8, // owned by drain's allocator
+        };
+
         var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
+        var pending_renames: std.ArrayListUnmanaged(PendingRename) = .empty;
+        defer {
+            // Any unpaired MOVED_FROM means the file was moved out of the watched tree.
+            for (pending_renames.items) |r| {
+                parent.send(.{ "FW", "change", r.path, EventType.deleted }) catch {}; // moved outside watched tree
+                allocator.free(r.path);
+            }
+            pending_renames.deinit(allocator);
+        }
+
         while (true) {
             const n = std.posix.read(self.inotify_fd, &buf) catch |e| switch (e) {
-                error.WouldBlock => return,
+                error.WouldBlock => break,
                 else => return e,
             };
             var offset: usize = 0;
@@ -143,22 +163,50 @@ const LinuxBackend = struct {
                     std.mem.sliceTo(buf[name_offset..][0..ev.len], 0)
                 else
                     "";
-                const event_type: EventType = if (ev.mask & IN.CREATE != 0)
-                    .created
-                else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0)
-                    .deleted
-                else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
-                    .modified
-                else if (ev.mask & (IN.MOVED_FROM | IN.MOVED_TO | IN.MOVE_SELF) != 0)
-                    .renamed
+
+                var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const full_path: []const u8 = if (name.len > 0)
+                    try std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ watched_path, name })
                 else
-                    continue;
-                if (name.len > 0) {
-                    var full_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const full_path = try std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ watched_path, name });
-                    try parent.send(.{ "FW", "change", full_path, event_type });
+                    watched_path;
+
+                if (ev.mask & IN.MOVED_FROM != 0) {
+                    // Park it, we may receive a paired MOVED_TO with the same cookie.
+                    try pending_renames.append(allocator, .{
+                        .cookie = ev.cookie,
+                        .path = try allocator.dupe(u8, full_path),
+                    });
+                } else if (ev.mask & IN.MOVED_TO != 0) {
+                    // Look for a paired MOVED_FROM.
+                    var found: ?usize = null;
+                    for (pending_renames.items, 0..) |r, i| {
+                        if (r.cookie == ev.cookie) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    if (found) |i| {
+                        // Complete rename pair: emit a single atomic rename message.
+                        const r = pending_renames.swapRemove(i);
+                        defer allocator.free(r.path);
+                        try parent.send(.{ "FW", "rename", r.path, full_path });
+                    } else {
+                        // No paired MOVED_FROM, file was moved in from outside the watched tree.
+                        try parent.send(.{ "FW", "change", full_path, EventType.created });
+                    }
+                } else if (ev.mask & IN.MOVE_SELF != 0) {
+                    // The watched directory itself was renamed/moved away.
+                    try parent.send(.{ "FW", "change", full_path, EventType.deleted });
                 } else {
-                    try parent.send(.{ "FW", "change", watched_path, event_type });
+                    const event_type: EventType = if (ev.mask & IN.CREATE != 0)
+                        .created
+                    else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0)
+                        .deleted
+                    else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
+                        .modified
+                    else
+                        continue;
+                    try parent.send(.{ "FW", "change", full_path, event_type });
                 }
             }
         }
@@ -227,7 +275,8 @@ const MacosBackend = struct {
         }
     }
 
-    fn drain(self: *MacosBackend, parent: tp.pid_ref) !void {
+    fn drain(self: *MacosBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+        _ = allocator;
         var events: [64]std.posix.Kevent = undefined;
         const immediate: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
         const n = std.posix.kevent(self.kq, &.{}, &events, &immediate) catch return;
@@ -350,7 +399,8 @@ const WindowsBackend = struct {
         }
     }
 
-    fn drain(self: *WindowsBackend, parent: tp.pid_ref) !void {
+    fn drain(self: *WindowsBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+        _ = allocator;
         var bytes: windows.DWORD = 0;
         var key: windows.ULONG_PTR = 0;
         var overlapped_ptr: ?*windows.OVERLAPPED = null;
@@ -453,13 +503,13 @@ const Process = struct {
         var err_msg: []const u8 = undefined;
 
         if (try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_ready" })) {
-            self.backend.drain(self.parent.ref()) catch |e| self.logger.err("drain", e);
+            self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
             self.backend.arm();
         } else if (try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_error", tp.extract(&err_code), tp.extract(&err_msg) })) {
             self.logger.print("fd read error on {s}: ({d}) {s}", .{ tag, err_code, err_msg });
             self.backend.arm();
         } else if (builtin.os.tag == .windows and try cbor.match(m.buf, .{"FW_poll"})) {
-            self.backend.drain(self.parent.ref()) catch |e| self.logger.err("drain", e);
+            self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
             self.backend.arm();
         } else if (try cbor.match(m.buf, .{ "watch", tp.extract(&path) })) {
             self.backend.add_watch(self.allocator, path) catch |e| self.logger.err("watch", e);
