@@ -13,6 +13,9 @@ pub const EventType = enum {
     created,
     modified,
     deleted,
+    /// A new directory was created inside a watched directory. The receiver
+    /// should call watch() on the path to get events for files created in it.
+    dir_created,
     /// Only produced on macOS and Windows where the OS gives no pairing info.
     /// On Linux, paired renames are emitted as a { "FW", "rename", from, to } message instead.
     renamed,
@@ -205,7 +208,7 @@ const INotifyBackend = struct {
                     try parent.send(.{ "FW", "change", full_path, EventType.deleted });
                 } else {
                     const event_type: EventType = if (ev.mask & IN.CREATE != 0)
-                        .created
+                        if (ev.mask & IN.ISDIR != 0) .dir_created else .created
                     else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0)
                         .deleted
                     else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
@@ -233,6 +236,7 @@ const FSEventsBackend = struct {
     const kFSEventStreamEventFlagItemRemoved: u32 = 0x00000200;
     const kFSEventStreamEventFlagItemRenamed: u32 = 0x00000800;
     const kFSEventStreamEventFlagItemModified: u32 = 0x00001000;
+    const kFSEventStreamEventFlagItemIsDir: u32 = 0x00020000;
     const kFSEventStreamEventIdSinceNow: u64 = 0xFFFFFFFFFFFFFFFF;
     const kCFStringEncodingUTF8: u32 = 0x08000100;
 
@@ -372,7 +376,7 @@ const FSEventsBackend = struct {
             const event_type: EventType = if (flags & kFSEventStreamEventFlagItemRemoved != 0)
                 .deleted
             else if (flags & kFSEventStreamEventFlagItemCreated != 0)
-                .created
+                if (flags & kFSEventStreamEventFlagItemIsDir != 0) .dir_created else .created
             else if (flags & kFSEventStreamEventFlagItemRenamed != 0)
                 .renamed
             else if (flags & kFSEventStreamEventFlagItemModified != 0)
@@ -530,6 +534,19 @@ const KQueueBackend = struct {
             try current.put(allocator, name, {});
         }
 
+        // Emit dir_created for new subdirectories outside the lock (no snapshot involvement).
+        var dir2 = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+        defer dir2.close();
+        var dir_iter = dir2.iterate();
+        while (try dir_iter.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            // Only emit if not already watched.
+            if (!snapshots.contains(full_path))
+                try parent.send(.{ "FW", "change", full_path, EventType.dir_created });
+        }
+
         snapshots_mutex.lock();
         defer snapshots_mutex.unlock();
 
@@ -654,6 +671,7 @@ const WindowsBackend = struct {
             dwCompletionKey: windows.ULONG_PTR,
             lpOverlapped: ?*windows.OVERLAPPED,
         ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const windows.WCHAR) callconv(.winapi) windows.DWORD;
     };
 
     iocp: windows.HANDLE,
@@ -764,8 +782,25 @@ const WindowsBackend = struct {
                             offset += info.NextEntryOffset;
                             continue;
                         };
+                        // Distinguish files from directories.
+                        const is_dir = blk: {
+                            var full_path_w: [std.fs.max_path_bytes]windows.WCHAR = undefined;
+                            const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk false;
+                            full_path_w[len] = 0;
+                            const attrs = win32.GetFileAttributesW(full_path_w[0..len :0]);
+                            const INVALID: windows.DWORD = 0xFFFFFFFF;
+                            const FILE_ATTRIBUTE_DIRECTORY: windows.DWORD = 0x10;
+                            break :blk attrs != INVALID and (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        };
+                        const adjusted_event_type: EventType = if (is_dir and event_type == .created)
+                            .dir_created
+                        else if (is_dir) { // Other directory events (modified, deleted, renamed), skip.
+                            if (info.NextEntryOffset == 0) break;
+                            offset += info.NextEntryOffset;
+                            continue;
+                        } else event_type;
                         watches_mutex.unlock();
-                        parent.send(.{ "FW", "change", full_path, event_type }) catch {
+                        parent.send(.{ "FW", "change", full_path, adjusted_event_type }) catch {
                             watches_mutex.lock();
                             break;
                         };
