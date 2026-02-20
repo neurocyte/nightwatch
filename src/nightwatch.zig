@@ -132,7 +132,10 @@ const INotifyBackend = struct {
         }
     }
 
-    fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, Exit })!void {
+    fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) (std.posix.ReadError || error{ ThespianFileDescriptorWaitReadFailed, NoSpaceLeft, OutOfMemory, Exit })!void {
+        // re-arm the file_discriptor
+        try self.fd_watcher.wait_read();
+
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
