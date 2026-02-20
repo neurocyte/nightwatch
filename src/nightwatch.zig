@@ -62,13 +62,13 @@ fn create() SpawnError!Self {
 }
 
 const Backend = switch (builtin.os.tag) {
-    .linux => LinuxBackend,
-    .macos => MacosBackend,
+    .linux => INotifyBackend,
+    .macos, .freebsd => KQueueBackend,
     .windows => WindowsBackend,
     else => @compileError("file_watcher: unsupported OS"),
 };
 
-const LinuxBackend = struct {
+const INotifyBackend = struct {
     inotify_fd: std.posix.fd_t,
     fd_watcher: tp.file_descriptor,
     watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
@@ -81,14 +81,14 @@ const LinuxBackend = struct {
 
     const in_flags: std.os.linux.O = .{ .NONBLOCK = true };
 
-    fn init() !LinuxBackend {
+    fn init() !INotifyBackend {
         const ifd = std.posix.inotify_init1(@bitCast(in_flags)) catch return error.FileWatcherFailed;
         errdefer std.posix.close(ifd);
         const fwd = tp.file_descriptor.init(module_name, ifd) catch return error.FileWatcherFailed;
         return .{ .inotify_fd = ifd, .fd_watcher = fwd, .watches = .empty };
     }
 
-    fn deinit(self: *LinuxBackend, allocator: std.mem.Allocator) void {
+    fn deinit(self: *INotifyBackend, allocator: std.mem.Allocator) void {
         self.fd_watcher.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| allocator.free(entry.value_ptr.*);
@@ -96,11 +96,11 @@ const LinuxBackend = struct {
         std.posix.close(self.inotify_fd);
     }
 
-    fn arm(self: *LinuxBackend) void {
+    fn arm(self: *INotifyBackend) void {
         self.fd_watcher.wait_read() catch {};
     }
 
-    fn add_watch(self: *LinuxBackend, allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *INotifyBackend, allocator: std.mem.Allocator, path: []const u8) !void {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
         const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
@@ -112,7 +112,7 @@ const LinuxBackend = struct {
         result.value_ptr.* = owned_path;
     }
 
-    fn remove_watch(self: *LinuxBackend, allocator: std.mem.Allocator, path: []const u8) void {
+    fn remove_watch(self: *INotifyBackend, allocator: std.mem.Allocator, path: []const u8) void {
         var it = self.watches.iterator();
         while (it.next()) |entry| {
             if (!std.mem.eql(u8, entry.value_ptr.*, path)) continue;
@@ -123,7 +123,7 @@ const LinuxBackend = struct {
         }
     }
 
-    fn drain(self: *LinuxBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *INotifyBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
@@ -213,7 +213,7 @@ const LinuxBackend = struct {
     }
 };
 
-const MacosBackend = struct {
+const KQueueBackend = struct {
     kq: std.posix.fd_t,
     fd_watcher: tp.file_descriptor,
     watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned path -> fd
@@ -228,14 +228,14 @@ const MacosBackend = struct {
     const NOTE_ATTRIB: u32 = 0x00000008;
     const NOTE_EXTEND: u32 = 0x00000004;
 
-    fn init() !MacosBackend {
+    fn init() !KQueueBackend {
         const kq = std.posix.kqueue() catch return error.FileWatcherFailed;
         errdefer std.posix.close(kq);
         const fwd = tp.file_descriptor.init(module_name, kq) catch return error.FileWatcherFailed;
         return .{ .kq = kq, .fd_watcher = fwd, .watches = .empty };
     }
 
-    fn deinit(self: *MacosBackend, allocator: std.mem.Allocator) void {
+    fn deinit(self: *KQueueBackend, allocator: std.mem.Allocator) void {
         self.fd_watcher.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| {
@@ -246,11 +246,11 @@ const MacosBackend = struct {
         std.posix.close(self.kq);
     }
 
-    fn arm(self: *MacosBackend) void {
+    fn arm(self: *KQueueBackend) void {
         self.fd_watcher.wait_read() catch {};
     }
 
-    fn add_watch(self: *MacosBackend, allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *KQueueBackend, allocator: std.mem.Allocator, path: []const u8) !void {
         if (self.watches.contains(path)) return;
         const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return error.FileWatcherFailed;
         errdefer std.posix.close(path_fd);
@@ -268,14 +268,14 @@ const MacosBackend = struct {
         try self.watches.put(allocator, owned_path, path_fd);
     }
 
-    fn remove_watch(self: *MacosBackend, allocator: std.mem.Allocator, path: []const u8) void {
+    fn remove_watch(self: *KQueueBackend, allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchRemove(path)) |entry| {
             std.posix.close(entry.value);
             allocator.free(entry.key);
         }
     }
 
-    fn drain(self: *MacosBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *KQueueBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         _ = allocator;
         var events: [64]std.posix.Kevent = undefined;
         const immediate: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
