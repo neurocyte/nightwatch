@@ -78,8 +78,6 @@ const INotifyBackend = struct {
     fd_watcher: tp.file_descriptor,
     watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
 
-    const threaded = false;
-
     const IN = std.os.linux.IN;
 
     const watch_mask: u32 = IN.CREATE | IN.DELETE | IN.MODIFY |
@@ -131,7 +129,7 @@ const INotifyBackend = struct {
         }
     }
 
-    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, Exit })!void {
+    fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, Exit })!void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
@@ -228,7 +226,6 @@ const FSEventsBackend = struct {
     watches: std.StringArrayHashMapUnmanaged(void), // owned paths
     mutex: std.Thread.Mutex, // protects run_loop
 
-    const threaded = false; // callback sends FW messages directly; no FW_event needed
     const kFSEventStreamCreateFlagNoDefer: u32 = 0x00000002;
     const kFSEventStreamCreateFlagFileEvents: u32 = 0x00000010;
     const kFSEventStreamEventFlagItemCreated: u32 = 0x00000100;
@@ -418,8 +415,6 @@ const KQueueBackend = struct {
     thread: ?std.Thread,
     watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned path -> fd
 
-    const threaded = false; // events processed directly in thread_fn; no FW_event needed
-
     const EVFILT_VNODE: i16 = -4;
     const EVFILT_READ: i16 = -1;
     const EV_ADD: u16 = 0x0001;
@@ -529,7 +524,6 @@ const KQueueBackend = struct {
 };
 
 const WindowsBackend = struct {
-    const threaded = true;
     const windows = std.os.windows;
 
     const win32 = struct {
@@ -687,7 +681,7 @@ const WindowsBackend = struct {
         }
     }
 
-    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn handle_fw_event(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         _ = allocator;
         var bytes: windows.DWORD = 0;
         var key: windows.ULONG_PTR = 0;
@@ -791,12 +785,12 @@ const Process = struct {
         var err_code: i64 = 0;
         var err_msg: []const u8 = undefined;
 
-        if (!Backend.threaded and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_ready" })) {
-            self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
-        } else if (!Backend.threaded and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_error", tp.extract(&err_code), tp.extract(&err_msg) })) {
+        if (@hasDecl(Backend, "handle_read_ready") and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_ready" })) {
+            self.backend.handle_read_ready(self.allocator, self.parent.ref()) catch |e| self.logger.err("handle_read_ready", e);
+        } else if (@hasDecl(Backend, "handle_read_ready") and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_error", tp.extract(&err_code), tp.extract(&err_msg) })) {
             self.logger.print("fd read error on {s}: ({d}) {s}", .{ tag, err_code, err_msg });
-        } else if (Backend.threaded and try cbor.match(m.buf, .{"FW_event"})) {
-            self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
+        } else if (@hasDecl(Backend, "handle_fw_event") and try cbor.match(m.buf, .{"FW_event"})) {
+            self.backend.handle_fw_event(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
         } else if (try cbor.match(m.buf, .{ "watch", tp.extract(&path) })) {
             self.backend.add_watch(self.allocator, path) catch |e| self.logger.err("watch", e);
         } else if (try cbor.match(m.buf, .{ "unwatch", tp.extract(&path) })) {
