@@ -67,7 +67,8 @@ fn create() SpawnError!Self {
 
 const Backend = switch (builtin.os.tag) {
     .linux => INotifyBackend,
-    .macos, .freebsd => KQueueBackend,
+    .macos => FSEventsBackend,
+    .freebsd => KQueueBackend,
     .windows => WindowsBackend,
     else => @compileError("file_watcher: unsupported OS"),
 };
@@ -218,6 +219,199 @@ const INotifyBackend = struct {
             }
         }
     }
+};
+
+const FSEventsBackend = struct {
+    thread: ?std.Thread,
+    run_loop: ?*anyopaque, // CFRunLoopRef, set by the background thread before blocking
+    stream: ?*anyopaque, // FSEventStreamRef, created on the background thread
+    watches: std.StringArrayHashMapUnmanaged(void), // owned paths
+    mutex: std.Thread.Mutex, // protects run_loop
+
+    const threaded = false; // callback sends FW messages directly; no FW_event needed
+    const kFSEventStreamCreateFlagNoDefer: u32 = 0x00000002;
+    const kFSEventStreamCreateFlagFileEvents: u32 = 0x00000010;
+    const kFSEventStreamEventFlagItemCreated: u32 = 0x00000100;
+    const kFSEventStreamEventFlagItemRemoved: u32 = 0x00000200;
+    const kFSEventStreamEventFlagItemRenamed: u32 = 0x00000800;
+    const kFSEventStreamEventFlagItemModified: u32 = 0x00001000;
+    const kFSEventStreamEventIdSinceNow: u64 = 0xFFFFFFFFFFFFFFFF;
+
+    // CoreFoundation / CoreServices extern declarations
+    const cf = struct {
+        pub extern "c" fn CFStringCreateWithBytesNoCopy(
+            alloc: ?*anyopaque,
+            bytes: [*]const u8,
+            numBytes: isize,
+            encoding: u32, // kCFStringEncodingUTF8 = 0x08000100
+            isExternalRepresentation: u8,
+            contentsDeallocator: ?*anyopaque,
+        ) ?*anyopaque;
+        pub extern "c" fn CFArrayCreate(
+            allocator: ?*anyopaque,
+            values: [*]const ?*anyopaque,
+            numValues: isize,
+            callBacks: ?*anyopaque,
+        ) ?*anyopaque;
+        pub extern "c" fn CFRelease(cf: *anyopaque) void;
+        pub extern "c" fn CFRunLoopGetCurrent() *anyopaque;
+        pub extern "c" fn CFRunLoopRun() void;
+        pub extern "c" fn CFRunLoopStop(rl: *anyopaque) void;
+        pub extern "c" fn CFRunLoopAddSource(rl: *anyopaque, source: *anyopaque, mode: *anyopaque) void;
+        pub extern "c" fn FSEventStreamCreate(
+            allocator: ?*anyopaque,
+            callback: *const anyopaque,
+            context: ?*anyopaque,
+            pathsToWatch: *anyopaque,
+            sinceWhen: u64,
+            latency: f64,
+            flags: u32,
+        ) ?*anyopaque;
+        pub extern "c" fn FSEventStreamSchedule(stream: *anyopaque, runLoop: *anyopaque, runLoopMode: *anyopaque) void;
+        pub extern "c" fn FSEventStreamStart(stream: *anyopaque) u8;
+        pub extern "c" fn FSEventStreamStop(stream: *anyopaque) void;
+        pub extern "c" fn FSEventStreamInvalidate(stream: *anyopaque) void;
+        pub extern "c" fn FSEventStreamRelease(stream: *anyopaque) void;
+        // kCFRunLoopDefaultMode, a well-known constant pointer exported by CoreFoundation
+        pub extern "c" var kCFRunLoopDefaultMode: *anyopaque;
+        pub extern "c" var kCFAllocatorDefault: *anyopaque;
+        pub extern "c" var kCFAllocatorNull: *anyopaque;
+    };
+
+    const kCFStringEncodingUTF8: u32 = 0x08000100;
+
+    // Context passed to the FSEvents callback via the thread's stack.
+    const CallbackContext = struct {
+        parent: tp.pid,
+    };
+
+    fn init() error{}!@This() {
+        return .{
+            .thread = null,
+            .run_loop = null,
+            .stream = null,
+            .watches = .empty,
+            .mutex = .{},
+        };
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        // Stop the run loop, which causes the thread to exit.
+        self.mutex.lock();
+        const rl = self.run_loop;
+        self.mutex.unlock();
+        if (rl) |r| cf.CFRunLoopStop(r);
+        if (self.thread) |t| t.join();
+        // Stream is cleaned up by the thread before it exits.
+        var it = self.watches.iterator();
+        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+        self.watches.deinit(allocator);
+    }
+
+    fn arm(self: *@This(), parent: tp.pid) std.Thread.SpawnError!void {
+        errdefer parent.deinit();
+        if (self.thread != null) return;
+        self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self, parent });
+    }
+
+    const FSEventStreamCallback = *const fn (
+        stream: *anyopaque,
+        info: ?*anyopaque,
+        numEvents: usize,
+        eventPaths: *anyopaque,
+        eventFlags: [*]const u32,
+        eventIds: [*]const u64,
+    ) callconv(.c) void;
+
+    fn callback(
+        _: *anyopaque,
+        info: ?*anyopaque,
+        num_events: usize,
+        event_paths: *anyopaque,
+        event_flags: [*]const u32,
+        _: [*]const u64,
+    ) callconv(.c) void {
+        const ctx: *CallbackContext = @ptrCast(@alignCast(info orelse return));
+        const paths: [*][*:0]const u8 = @ptrCast(@alignCast(event_paths));
+        for (0..num_events) |i| {
+            const path = std.mem.sliceTo(paths[i], 0);
+            const flags = event_flags[i];
+            const event_type: EventType = if (flags & kFSEventStreamEventFlagItemRemoved != 0)
+                .deleted
+            else if (flags & kFSEventStreamEventFlagItemCreated != 0)
+                .created
+            else if (flags & kFSEventStreamEventFlagItemRenamed != 0)
+                .renamed
+            else if (flags & kFSEventStreamEventFlagItemModified != 0)
+                .modified
+            else
+                continue;
+            ctx.parent.send(.{ "FW", "change", path, event_type }) catch return;
+        }
+    }
+
+    fn thread_fn(self: *@This(), parent: tp.pid) void {
+        var ctx = CallbackContext{ .parent = parent };
+        defer ctx.parent.deinit();
+
+        // Build the CFArray of paths to watch.
+        var cf_strings: std.ArrayListUnmanaged(?*anyopaque) = .empty;
+        defer cf_strings.deinit(std.heap.c_allocator);
+        var it = self.watches.iterator();
+        while (it.next()) |entry| {
+            const path = entry.key_ptr.*;
+            const s = cf.CFStringCreateWithBytesNoCopy(null, path.ptr, @intCast(path.len), kCFStringEncodingUTF8, 0, cf.kCFAllocatorNull) orelse continue;
+            cf_strings.append(std.heap.c_allocator, s) catch {
+                cf.CFRelease(s);
+                break;
+            };
+        }
+        defer for (cf_strings.items) |s| cf.CFRelease(s.?);
+
+        const paths_array = cf.CFArrayCreate(null, cf_strings.items.ptr, @intCast(cf_strings.items.len), null) orelse return;
+        defer cf.CFRelease(paths_array);
+
+        const stream = cf.FSEventStreamCreate(
+            null,
+            @ptrCast(&callback),
+            &ctx,
+            paths_array,
+            kFSEventStreamEventIdSinceNow,
+            0.1, // 100ms latency
+            kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents,
+        ) orelse return;
+        defer {
+            cf.FSEventStreamStop(stream);
+            cf.FSEventStreamInvalidate(stream);
+            cf.FSEventStreamRelease(stream);
+        }
+
+        const rl = cf.CFRunLoopGetCurrent();
+        cf.FSEventStreamSchedule(stream, rl, cf.kCFRunLoopDefaultMode);
+        _ = cf.FSEventStreamStart(stream);
+
+        // Publish the run loop reference so deinit() can stop it.
+        self.mutex.lock();
+        self.run_loop = rl;
+        self.mutex.unlock();
+
+        cf.CFRunLoopRun(); // blocks until CFRunLoopStop is called
+    }
+
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!void {
+        if (self.watches.contains(path)) return;
+        const owned = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned);
+        try self.watches.put(allocator, owned, {});
+        // Note: watches added after arm() take effect on the next restart.
+        // In practice, all watches are added before the first open() call.
+    }
+
+    fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
+        if (self.watches.fetchSwapRemove(path)) |entry| allocator.free(entry.key);
+    }
+
+    fn drain(_: *@This(), _: std.mem.Allocator, _: tp.pid_ref) tp.result {}
 };
 
 const KQueueBackend = struct {
