@@ -302,6 +302,36 @@ const MacosBackend = struct {
 const WindowsBackend = struct {
     const windows = std.os.windows;
 
+    const win32 = struct {
+        pub extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn ReadDirectoryChangesW(
+            hDirectory: windows.HANDLE,
+            lpBuffer: *anyopaque,
+            nBufferLength: windows.DWORD,
+            bWatchSubtree: windows.BOOL,
+            dwNotifyFilter: windows.DWORD,
+            lpBytesReturned: ?*windows.DWORD,
+            lpOverlapped: ?*windows.OVERLAPPED,
+            lpCompletionRoutine: ?*anyopaque,
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn GetQueuedCompletionStatus(
+            CompletionPort: windows.HANDLE,
+            lpNumberOfBytesTransferred: *windows.DWORD,
+            lpCompletionKey: *windows.ULONG_PTR,
+            lpOverlapped: *?*windows.OVERLAPPED,
+            dwMilliseconds: windows.DWORD,
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn CreateFileW(
+            lpFileName: [*:0]const windows.WCHAR,
+            dwDesiredAccess: windows.DWORD,
+            dwShareMode: windows.DWORD,
+            lpSecurityAttributes: ?*anyopaque,
+            dwCreationDisposition: windows.DWORD,
+            dwFlagsAndAttributes: windows.DWORD,
+            hTemplateFile: ?windows.HANDLE,
+        ) callconv(.winapi) windows.HANDLE;
+    };
+
     iocp: windows.HANDLE,
     poll_timer: ?tp.timeout,
     watches: std.StringHashMapUnmanaged(Watch),
@@ -310,12 +340,13 @@ const WindowsBackend = struct {
 
     const Watch = struct {
         handle: windows.HANDLE,
-        buf: *align(4) [buf_size]u8,
+        buf: Buf,
         overlapped: windows.OVERLAPPED,
         path: []u8, // owned
     };
 
     const buf_size = 65536;
+    const Buf = []align(4) u8;
 
     const FILE_NOTIFY_INFORMATION = extern struct {
         NextEntryOffset: windows.DWORD,
@@ -347,12 +378,12 @@ const WindowsBackend = struct {
         if (self.poll_timer) |*t| t.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| {
-            _ = windows.kernel32.CloseHandle(entry.value_ptr.*.handle);
+            _ = win32.CloseHandle(entry.value_ptr.*.handle);
             allocator.free(entry.value_ptr.*.path);
-            allocator.destroy(entry.value_ptr.*.buf);
+            allocator.free(entry.value_ptr.*.buf);
         }
         self.watches.deinit(allocator);
-        _ = windows.kernel32.CloseHandle(self.iocp);
+        _ = win32.CloseHandle(self.iocp);
     }
 
     fn arm(self: *WindowsBackend) void {
@@ -364,7 +395,7 @@ const WindowsBackend = struct {
         if (self.watches.contains(path)) return;
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(path_w);
-        const handle = windows.kernel32.CreateFileW(
+        const handle = win32.CreateFileW(
             path_w,
             windows.GENERIC_READ,
             windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
@@ -374,14 +405,14 @@ const WindowsBackend = struct {
             null,
         );
         if (handle == windows.INVALID_HANDLE_VALUE) return error.FileWatcherFailed;
-        errdefer _ = windows.kernel32.CloseHandle(handle);
+        errdefer _ = win32.CloseHandle(handle);
         _ = windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0) catch return error.FileWatcherFailed;
-        const buf = try allocator.create([buf_size]u8);
-        errdefer allocator.destroy(buf);
+        const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4), buf_size);
+        errdefer allocator.free(buf);
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
-        if (windows.kernel32.ReadDirectoryChangesW(handle, buf, buf_size, 1, notify_filter, null, &overlapped, null) == 0)
+        if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &overlapped, null) == 0)
             return error.FileWatcherFailed;
         try self.watches.put(allocator, owned_path, .{
             .handle = handle,
@@ -393,9 +424,9 @@ const WindowsBackend = struct {
 
     fn remove_watch(self: *WindowsBackend, allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchRemove(path)) |entry| {
-            _ = windows.kernel32.CloseHandle(entry.value.handle);
+            _ = win32.CloseHandle(entry.value.handle);
             allocator.free(entry.value.path);
-            allocator.destroy(entry.value.buf);
+            allocator.free(entry.value.buf);
         }
     }
 
@@ -405,7 +436,7 @@ const WindowsBackend = struct {
         var key: windows.ULONG_PTR = 0;
         var overlapped_ptr: ?*windows.OVERLAPPED = null;
         while (true) {
-            const ok = windows.kernel32.GetQueuedCompletionStatus(self.iocp, &bytes, &key, &overlapped_ptr, 0);
+            const ok = win32.GetQueuedCompletionStatus(self.iocp, &bytes, &key, &overlapped_ptr, 0);
             if (ok == 0 or overlapped_ptr == null) break;
             const triggered_handle: windows.HANDLE = @ptrFromInt(key);
             var it = self.watches.iterator();
@@ -416,7 +447,7 @@ const WindowsBackend = struct {
                     var offset: usize = 0;
                     while (offset < bytes) {
                         const info: *FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(w.buf[offset..].ptr));
-                        const name_wchars = info.FileName[0 .. info.FileNameLength / 2];
+                        const name_wchars = (&info.FileName).ptr[0 .. info.FileNameLength / 2];
                         var name_buf: [std.fs.max_path_bytes]u8 = undefined;
                         const name_len = std.unicode.utf16LeToUtf8(&name_buf, name_wchars) catch 0;
                         const event_type: EventType = switch (info.Action) {
@@ -439,7 +470,7 @@ const WindowsBackend = struct {
                 }
                 // Re-arm ReadDirectoryChangesW for the next batch.
                 w.overlapped = std.mem.zeroes(windows.OVERLAPPED);
-                _ = windows.kernel32.ReadDirectoryChangesW(w.handle, w.buf, buf_size, 1, notify_filter, null, &w.overlapped, null);
+                _ = win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null);
                 break;
             }
         }
