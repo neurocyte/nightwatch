@@ -775,7 +775,7 @@ const Process = struct {
         errdefer self.deinit();
         _ = tp.set_trap(true);
         self.backend = Backend.init() catch |e| return tp.exit_error(e, @errorReturnTrace());
-        self.backend.arm(tp.self_pid().clone()) catch |e| return tp.exit_error(e, @errorReturnTrace());
+        self.backend.arm(self.parent.clone()) catch |e| return tp.exit_error(e, @errorReturnTrace());
         tp.receive(&self.receiver);
     }
 
