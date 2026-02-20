@@ -73,6 +73,8 @@ const INotifyBackend = struct {
     fd_watcher: tp.file_descriptor,
     watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
 
+    const polling = false;
+
     const IN = std.os.linux.IN;
 
     const watch_mask: u32 = IN.CREATE | IN.DELETE | IN.MODIFY |
@@ -215,8 +217,11 @@ const INotifyBackend = struct {
 
 const KQueueBackend = struct {
     kq: std.posix.fd_t,
-    fd_watcher: tp.file_descriptor,
+    poll_timer: ?tp.timeout,
     watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned path -> fd
+
+    const polling = true;
+    const poll_interval_ms: u64 = 50;
 
     const EVFILT_VNODE: i16 = -4;
     const EV_ADD: u16 = 0x0001;
@@ -230,13 +235,11 @@ const KQueueBackend = struct {
 
     fn init() !@This() {
         const kq = std.posix.kqueue() catch return error.FileWatcherFailed;
-        errdefer std.posix.close(kq);
-        const fwd = tp.file_descriptor.init(module_name, kq) catch return error.FileWatcherFailed;
-        return .{ .kq = kq, .fd_watcher = fwd, .watches = .empty };
+        return .{ .kq = kq, .poll_timer = null, .watches = .empty };
     }
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        self.fd_watcher.deinit();
+        if (self.poll_timer) |*t| t.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| {
             std.posix.close(entry.value_ptr.*);
@@ -247,7 +250,8 @@ const KQueueBackend = struct {
     }
 
     fn arm(self: *@This()) void {
-        self.fd_watcher.wait_read() catch {};
+        if (self.poll_timer) |*t| t.deinit();
+        self.poll_timer = tp.timeout.init_ms(poll_interval_ms, tp.message.fmt(.{"FW_poll"})) catch null;
     }
 
     fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
@@ -300,6 +304,7 @@ const KQueueBackend = struct {
 };
 
 const WindowsBackend = struct {
+    const polling = true;
     const windows = std.os.windows;
 
     const win32 = struct {
@@ -533,13 +538,13 @@ const Process = struct {
         var err_code: i64 = 0;
         var err_msg: []const u8 = undefined;
 
-        if (try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_ready" })) {
+        if (!Backend.polling and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_ready" })) {
             self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
             self.backend.arm();
-        } else if (try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_error", tp.extract(&err_code), tp.extract(&err_msg) })) {
+        } else if (!Backend.polling and try cbor.match(m.buf, .{ "fd", tp.extract(&tag), "read_error", tp.extract(&err_code), tp.extract(&err_msg) })) {
             self.logger.print("fd read error on {s}: ({d}) {s}", .{ tag, err_code, err_msg });
             self.backend.arm();
-        } else if (builtin.os.tag == .windows and try cbor.match(m.buf, .{"FW_poll"})) {
+        } else if (Backend.polling and try cbor.match(m.buf, .{"FW_poll"})) {
             self.backend.drain(self.allocator, self.parent.ref()) catch |e| self.logger.err("drain", e);
             self.backend.arm();
         } else if (try cbor.match(m.buf, .{ "watch", tp.extract(&path) })) {
