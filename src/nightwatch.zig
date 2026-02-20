@@ -81,14 +81,14 @@ const INotifyBackend = struct {
 
     const in_flags: std.os.linux.O = .{ .NONBLOCK = true };
 
-    fn init() !INotifyBackend {
+    fn init() !@This() {
         const ifd = std.posix.inotify_init1(@bitCast(in_flags)) catch return error.FileWatcherFailed;
         errdefer std.posix.close(ifd);
         const fwd = tp.file_descriptor.init(module_name, ifd) catch return error.FileWatcherFailed;
         return .{ .inotify_fd = ifd, .fd_watcher = fwd, .watches = .empty };
     }
 
-    fn deinit(self: *INotifyBackend, allocator: std.mem.Allocator) void {
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.fd_watcher.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| allocator.free(entry.value_ptr.*);
@@ -96,11 +96,11 @@ const INotifyBackend = struct {
         std.posix.close(self.inotify_fd);
     }
 
-    fn arm(self: *INotifyBackend) void {
+    fn arm(self: *@This()) void {
         self.fd_watcher.wait_read() catch {};
     }
 
-    fn add_watch(self: *INotifyBackend, allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
         const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
@@ -112,7 +112,7 @@ const INotifyBackend = struct {
         result.value_ptr.* = owned_path;
     }
 
-    fn remove_watch(self: *INotifyBackend, allocator: std.mem.Allocator, path: []const u8) void {
+    fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
         var it = self.watches.iterator();
         while (it.next()) |entry| {
             if (!std.mem.eql(u8, entry.value_ptr.*, path)) continue;
@@ -123,7 +123,7 @@ const INotifyBackend = struct {
         }
     }
 
-    fn drain(self: *INotifyBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
@@ -228,14 +228,14 @@ const KQueueBackend = struct {
     const NOTE_ATTRIB: u32 = 0x00000008;
     const NOTE_EXTEND: u32 = 0x00000004;
 
-    fn init() !KQueueBackend {
+    fn init() !@This() {
         const kq = std.posix.kqueue() catch return error.FileWatcherFailed;
         errdefer std.posix.close(kq);
         const fwd = tp.file_descriptor.init(module_name, kq) catch return error.FileWatcherFailed;
         return .{ .kq = kq, .fd_watcher = fwd, .watches = .empty };
     }
 
-    fn deinit(self: *KQueueBackend, allocator: std.mem.Allocator) void {
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.fd_watcher.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| {
@@ -246,11 +246,11 @@ const KQueueBackend = struct {
         std.posix.close(self.kq);
     }
 
-    fn arm(self: *KQueueBackend) void {
+    fn arm(self: *@This()) void {
         self.fd_watcher.wait_read() catch {};
     }
 
-    fn add_watch(self: *KQueueBackend, allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
         if (self.watches.contains(path)) return;
         const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return error.FileWatcherFailed;
         errdefer std.posix.close(path_fd);
@@ -268,14 +268,14 @@ const KQueueBackend = struct {
         try self.watches.put(allocator, owned_path, path_fd);
     }
 
-    fn remove_watch(self: *KQueueBackend, allocator: std.mem.Allocator, path: []const u8) void {
+    fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchRemove(path)) |entry| {
             std.posix.close(entry.value);
             allocator.free(entry.key);
         }
     }
 
-    fn drain(self: *KQueueBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         _ = allocator;
         var events: [64]std.posix.Kevent = undefined;
         const immediate: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
@@ -368,13 +368,13 @@ const WindowsBackend = struct {
         0x00000010 | // FILE_NOTIFY_CHANGE_LAST_WRITE
         0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
-    fn init() !WindowsBackend {
+    fn init() !@This() {
         const iocp = windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1) catch
             return error.FileWatcherFailed;
         return .{ .iocp = iocp, .poll_timer = null, .watches = .empty };
     }
 
-    fn deinit(self: *WindowsBackend, allocator: std.mem.Allocator) void {
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.poll_timer) |*t| t.deinit();
         var it = self.watches.iterator();
         while (it.next()) |entry| {
@@ -386,12 +386,12 @@ const WindowsBackend = struct {
         _ = win32.CloseHandle(self.iocp);
     }
 
-    fn arm(self: *WindowsBackend) void {
+    fn arm(self: *@This()) void {
         if (self.poll_timer) |*t| t.deinit();
         self.poll_timer = tp.timeout.init_ms(poll_interval_ms, tp.message.fmt(.{"FW_poll"})) catch null;
     }
 
-    fn add_watch(self: *WindowsBackend, allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
         if (self.watches.contains(path)) return;
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(path_w);
@@ -422,7 +422,7 @@ const WindowsBackend = struct {
         });
     }
 
-    fn remove_watch(self: *WindowsBackend, allocator: std.mem.Allocator, path: []const u8) void {
+    fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchRemove(path)) |entry| {
             _ = win32.CloseHandle(entry.value.handle);
             allocator.free(entry.value.path);
@@ -430,7 +430,7 @@ const WindowsBackend = struct {
         }
     }
 
-    fn drain(self: *WindowsBackend, allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
         _ = allocator;
         var bytes: windows.DWORD = 0;
         var key: windows.ULONG_PTR = 0;
@@ -484,30 +484,30 @@ const Process = struct {
     receiver: Receiver,
     backend: Backend,
 
-    const Receiver = tp.Receiver(*Process);
+    const Receiver = tp.Receiver(*@This());
 
     fn create() SpawnError!tp.pid {
         const allocator = std.heap.c_allocator;
-        const self = try allocator.create(Process);
+        const self = try allocator.create(@This());
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .parent = tp.self_pid().clone(),
             .logger = log.logger(module_name),
-            .receiver = Receiver.init(Process.receive, self),
+            .receiver = Receiver.init(@This().receive, self),
             .backend = undefined,
         };
-        return tp.spawn_link(self.allocator, self, Process.start, module_name);
+        return tp.spawn_link(self.allocator, self, @This().start, module_name);
     }
 
-    fn deinit(self: *Process) void {
+    fn deinit(self: *@This()) void {
         self.backend.deinit(self.allocator);
         self.parent.deinit();
         self.logger.deinit();
         self.allocator.destroy(self);
     }
 
-    fn start(self: *Process) tp.result {
+    fn start(self: *@This()) tp.result {
         errdefer self.deinit();
         _ = tp.set_trap(true);
         self.backend = Backend.init() catch |e| return tp.exit_error(e, @errorReturnTrace());
@@ -515,7 +515,7 @@ const Process = struct {
         tp.receive(&self.receiver);
     }
 
-    fn receive(self: *Process, from: tp.pid_ref, m: tp.message) tp.result {
+    fn receive(self: *@This(), from: tp.pid_ref, m: tp.message) tp.result {
         errdefer self.deinit();
         return self.receive_safe(from, m) catch |e| switch (e) {
             error.ExitNormal => tp.exit_normal(),
@@ -527,7 +527,7 @@ const Process = struct {
         };
     }
 
-    fn receive_safe(self: *Process, _: tp.pid_ref, m: tp.message) (error{ExitNormal} || cbor.Error)!void {
+    fn receive_safe(self: *@This(), _: tp.pid_ref, m: tp.message) (error{ExitNormal} || cbor.Error)!void {
         var path: []const u8 = undefined;
         var tag: []const u8 = undefined;
         var err_code: i64 = 0;
