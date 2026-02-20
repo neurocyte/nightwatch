@@ -19,7 +19,11 @@ pub const EventType = enum {
 };
 
 pub const Error = FileWatcherError;
-pub const FileWatcherError = error{ FileWatcherFailed, ThespianSpawnFailed, OutOfMemory };
+pub const FileWatcherError = error{
+    FileWatcherSendFailed,
+    ThespianSpawnFailed,
+    OutOfMemory,
+};
 const SpawnError = error{ OutOfMemory, ThespianSpawnFailed };
 
 /// Watch a path (file or directory) for changes. The caller will receive:
@@ -51,7 +55,7 @@ fn get() SpawnError!Self {
 }
 
 fn send(message: anytype) FileWatcherError!void {
-    return (try get()).pid.send(message) catch error.FileWatcherFailed;
+    return (try get()).pid.send(message) catch error.FileWatcherSendFailed;
 }
 
 fn create() SpawnError!Self {
@@ -83,10 +87,10 @@ const INotifyBackend = struct {
 
     const in_flags: std.os.linux.O = .{ .NONBLOCK = true };
 
-    fn init() !@This() {
-        const ifd = std.posix.inotify_init1(@bitCast(in_flags)) catch return error.FileWatcherFailed;
+    fn init() error{ ProcessFdQuotaExceeded, SystemFdQuotaExceeded, SystemResources, Unexpected, ThespianFileDescriptorInitFailed }!@This() {
+        const ifd = try std.posix.inotify_init1(@bitCast(in_flags));
         errdefer std.posix.close(ifd);
-        const fwd = tp.file_descriptor.init(module_name, ifd) catch return error.FileWatcherFailed;
+        const fwd = try tp.file_descriptor.init(module_name, ifd);
         return .{ .inotify_fd = ifd, .fd_watcher = fwd, .watches = .empty };
     }
 
@@ -103,7 +107,7 @@ const INotifyBackend = struct {
         try self.fd_watcher.wait_read();
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!void {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
         const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
@@ -126,7 +130,7 @@ const INotifyBackend = struct {
         }
     }
 
-    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, Exit })!void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
@@ -236,10 +240,10 @@ const KQueueBackend = struct {
     const NOTE_ATTRIB: u32 = 0x00000008;
     const NOTE_EXTEND: u32 = 0x00000004;
 
-    fn init() !@This() {
-        const kq = std.posix.kqueue() catch return error.FileWatcherFailed;
+    fn init() (std.posix.KQueueError || std.posix.KEventError)!@This() {
+        const kq = try std.posix.kqueue();
         errdefer std.posix.close(kq);
-        const pipe = std.posix.pipe() catch return error.FileWatcherFailed;
+        const pipe = try std.posix.pipe();
         errdefer {
             std.posix.close(pipe[0]);
             std.posix.close(pipe[1]);
@@ -254,7 +258,7 @@ const KQueueBackend = struct {
             .data = 0,
             .udata = 0,
         };
-        _ = std.posix.kevent(kq, &.{shutdown_kev}, &.{}, null) catch return error.FileWatcherFailed;
+        _ = try std.posix.kevent(kq, &.{shutdown_kev}, &.{}, null);
         return .{ .kq = kq, .shutdown_pipe = pipe, .thread = null, .watches = .empty };
     }
 
@@ -295,9 +299,9 @@ const KQueueBackend = struct {
         }
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) (std.posix.OpenError || std.posix.KEventError || error{OutOfMemory})!void {
         if (self.watches.contains(path)) return;
-        const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return error.FileWatcherFailed;
+        const path_fd = try std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0);
         errdefer std.posix.close(path_fd);
         const kev = std.posix.Kevent{
             .ident = @intCast(path_fd),
@@ -307,7 +311,7 @@ const KQueueBackend = struct {
             .data = 0,
             .udata = 0,
         };
-        _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch return error.FileWatcherFailed;
+        _ = try std.posix.kevent(self.kq, &.{kev}, &.{}, null);
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         try self.watches.put(allocator, owned_path, path_fd);
@@ -320,7 +324,7 @@ const KQueueBackend = struct {
         }
     }
 
-    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) !void {
+    fn drain(self: *@This(), allocator: std.mem.Allocator, parent: tp.pid_ref) tp.result {
         _ = allocator;
         var events: [64]std.posix.Kevent = undefined;
         const immediate: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
@@ -422,9 +426,8 @@ const WindowsBackend = struct {
         0x00000010 | // FILE_NOTIFY_CHANGE_LAST_WRITE
         0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
-    fn init() !@This() {
-        const iocp = windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1) catch
-            return error.FileWatcherFailed;
+    fn init() windows.CreateIoCompletionPortError!@This() {
+        const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
         return .{ .iocp = iocp, .thread = null, .watches = .empty };
     }
 
@@ -461,7 +464,12 @@ const WindowsBackend = struct {
         }
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) (windows.CreateIoCompletionPortError || error{
+        InvalidUtf8,
+        OutOfMemory,
+        FileWatcherInvalidHandle,
+        FileWatcherReadDirectoryChangesFailed,
+    })!void {
         if (self.watches.contains(path)) return;
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(path_w);
@@ -474,16 +482,16 @@ const WindowsBackend = struct {
             0x02000000 | 0x40000000, // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED
             null,
         );
-        if (handle == windows.INVALID_HANDLE_VALUE) return error.FileWatcherFailed;
+        if (handle == windows.INVALID_HANDLE_VALUE) return error.FileWatcherInvalidHandle;
         errdefer _ = win32.CloseHandle(handle);
-        _ = windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0) catch return error.FileWatcherFailed;
+        _ = try windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0);
         const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4), buf_size);
         errdefer allocator.free(buf);
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
         if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &overlapped, null) == 0)
-            return error.FileWatcherFailed;
+            return error.FileWatcherReadDirectoryChangesFailed;
         try self.watches.put(allocator, owned_path, .{
             .handle = handle,
             .buf = buf,
