@@ -410,8 +410,6 @@ const FSEventsBackend = struct {
     fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchSwapRemove(path)) |entry| allocator.free(entry.key);
     }
-
-    fn drain(_: *@This(), _: std.mem.Allocator, _: tp.pid_ref) tp.result {}
 };
 
 const KQueueBackend = struct {
@@ -527,10 +525,6 @@ const KQueueBackend = struct {
             std.posix.close(entry.value);
             allocator.free(entry.key);
         }
-    }
-
-    fn drain(_: *@This(), _: std.mem.Allocator, _: tp.pid_ref) tp.result {
-        // Events are sent directly from thread_fn; nothing to do here.
     }
 };
 
