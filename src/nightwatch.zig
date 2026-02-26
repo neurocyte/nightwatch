@@ -324,7 +324,6 @@ const FSEventsBackend = struct {
             self.queue = null;
         }
         if (self.ctx) |c| {
-            c.parent.deinit();
             allocator.destroy(c);
             self.ctx = null;
         }
@@ -411,7 +410,7 @@ const FSEventsBackend = struct {
                 .modified
             else
                 continue;
-            ctx.parent.send(.{ "FW", "change", path, event_type }) catch return;
+            ctx.handler.change(path, event_type);
         }
     }
 
