@@ -14,12 +14,16 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption(bool, "use_fsevents", use_fsevents);
+    const options_mod = options.createModule();
 
     const mod = b.addModule("nightwatch", .{
         .root_source_file = b.path("src/nightwatch.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
-    mod.addOptions("build_options", options);
 
     if (use_fsevents) {
         const xcode_frameworks = b.lazyDependency("xcode-frameworks", .{}) orelse return;
@@ -37,6 +41,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "nightwatch", .module = mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -56,7 +61,15 @@ pub fn build(b: *std.Build) void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nightwatch", .module = mod },
+                .{ .name = "build_options", .module = options_mod },
+            },
+        }),
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 

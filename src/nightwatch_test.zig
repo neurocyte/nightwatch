@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const nw = @import("nightwatch.zig");
+const nw = @import("nightwatch");
 
 // ---------------------------------------------------------------------------
 // TestHandler - records every callback so tests can assert on them.
