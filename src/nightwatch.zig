@@ -72,7 +72,7 @@ pub fn watch(self: *@This(), path: []const u8) Error!void {
 }
 
 /// Stop watching a previously watched path
-pub fn unwatch(self: *@This(), path: []const u8) Error!void {
+pub fn unwatch(self: *@This(), path: []const u8) void {
     self.backend.remove_watch(self.allocator, path);
 }
 

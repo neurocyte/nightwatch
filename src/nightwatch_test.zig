@@ -393,7 +393,7 @@ test "unwatch stops delivering events for that directory" {
     try std.testing.expect(th.hasChange(file1, .created));
 
     // Stop watching, then create another file - must NOT appear.
-    try watcher.unwatch(tmp);
+    watcher.unwatch(tmp);
     const count_before = th.events.items.len;
 
     const file2 = try std.fmt.allocPrint(allocator, "{s}/after_unwatch.txt", .{tmp});
