@@ -45,7 +45,7 @@ pub const Handler = struct {
 };
 
 pub const ReadableStatus = enum {
-    is_readable, // backend may now read from fd
+    // TODO: is_readable, // backend may now read from fd (blocking mode)
     will_notify, // backend must wait for a handle_read_ready call
 };
 
@@ -121,9 +121,6 @@ const INotifyBackend = struct {
             error.HandlerFailed => |e_| return e_,
         }) {
             .will_notify => {},
-            .is_readable => {
-                @panic("TODO");
-            },
         };
     }
 
