@@ -494,7 +494,7 @@ const KQueueBackend = struct {
         self.watches.deinit(allocator);
         var sit = self.snapshots.iterator();
         while (sit.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
+            // Keys are borrowed from self.watches and freed in the watches loop above.
             var names = entry.value_ptr.*;
             var nit = names.iterator();
             while (nit.next()) |ne| allocator.free(ne.key_ptr.*);
