@@ -303,8 +303,14 @@ const FSEventsBackend = struct {
         handler: *Handler,
     };
 
-    fn init() error{}!@This() {
-        return .{ .stream = null, .queue = null, .ctx = null, .watches = .empty };
+    fn init(handler: *Handler) error{}!@This() {
+        return .{
+            .handler = handler,
+            .stream = null,
+            .queue = null,
+            .ctx = null,
+            .watches = .empty,
+        };
     }
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
