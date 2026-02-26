@@ -458,7 +458,7 @@ const KQueueBackend = struct {
     const NOTE_ATTRIB: u32 = 0x00000008;
     const NOTE_EXTEND: u32 = 0x00000004;
 
-    fn init() (std.posix.KQueueError || std.posix.KEventError)!@This() {
+    fn init(handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
         const kq = try std.posix.kqueue();
         errdefer std.posix.close(kq);
         const pipe = try std.posix.pipe();
@@ -477,7 +477,7 @@ const KQueueBackend = struct {
             .udata = 0,
         };
         _ = try std.posix.kevent(kq, &.{shutdown_kev}, &.{}, null);
-        return .{ .kq = kq, .shutdown_pipe = pipe, .thread = null, .watches = .empty, .snapshots = .empty, .snapshots_mutex = .{} };
+        return .{ .handler = handler, .kq = kq, .shutdown_pipe = pipe, .thread = null, .watches = .empty, .snapshots = .empty, .snapshots_mutex = .{} };
     }
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
