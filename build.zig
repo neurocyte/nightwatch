@@ -22,8 +22,7 @@ pub fn build(b: *std.Build) void {
     mod.addOptions("build_options", options);
 
     if (use_fsevents) {
-        const xcode_frameworks = b.lazyDependency("xcode-frameworks", .{}) orelse
-            @panic("xcode-frameworks dependency not available");
+        const xcode_frameworks = b.lazyDependency("xcode-frameworks", .{}) orelse return;
         mod.addSystemFrameworkPath(xcode_frameworks.path("Frameworks"));
         mod.addLibraryPath(xcode_frameworks.path("lib"));
         mod.linkFramework("CoreServices", .{});
