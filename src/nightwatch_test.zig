@@ -166,7 +166,7 @@ fn drainEvents(watcher: *Watcher) !void {
     if (builtin.os.tag == .linux) {
         try watcher.handle_read_ready();
     } else {
-        std.time.sleep(300 * std.time.ns_per_ms);
+        std.Thread.sleep(300 * std.time.ns_per_ms);
     }
 }
 

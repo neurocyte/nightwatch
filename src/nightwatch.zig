@@ -411,7 +411,11 @@ const FSEventsBackend = struct {
                 .modified
             else
                 continue;
-            ctx.handler.change(path, event_type);
+            ctx.handler.change(path, event_type) catch |e| switch (e) {
+                error.HandlerFailed => {
+                    std.log.err("nightwatch.callback failed: {t}", .{e});
+                },
+            };
         }
     }
 
