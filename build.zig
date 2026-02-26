@@ -56,11 +56,13 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
 
     const mod_tests = b.addTest(.{
+        .name = "mod_tests",
         .root_module = mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
+        .name = "exe_tests",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -76,6 +78,7 @@ pub fn build(b: *std.Build) void {
     // Integration test suite: exercises the public API by performing real
     // filesystem operations and verifying Handler callbacks via TestHandler.
     const integration_tests = b.addTest(.{
+        .name = "integration_tests",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/nightwatch_test.zig"),
             .target = target,
@@ -91,4 +94,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_integration_tests.step);
+
+    b.installArtifact(mod_tests);
+    b.installArtifact(exe_tests);
+    b.installArtifact(integration_tests);
 }
