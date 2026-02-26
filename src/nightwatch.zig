@@ -30,11 +30,11 @@ pub const Handler = struct {
         wait_readable: if (builtin.os.tag == .linux) *const fn (handler: *Handler) error{HandlerFailed}!ReadableStatus else void,
     };
 
-    fn change(handler: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!ReadableStatus {
+    fn change(handler: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void {
         return handler.vtable.change(handler, path, event_type);
     }
 
-    fn rename(handler: *Handler, src_path: []const u8, dst_path: []const u8) error{HandlerFailed}!ReadableStatus {
+    fn rename(handler: *Handler, src_path: []const u8, dst_path: []const u8) error{HandlerFailed}!void {
         return handler.vtable.rename(handler, src_path, dst_path);
     }
 
@@ -116,7 +116,14 @@ const INotifyBackend = struct {
     }
 
     fn arm(self: *@This(), _: std.mem.Allocator) error{HandlerFailed}!void {
-        return self.handler.wait_readable();
+        return switch (self.handler.wait_readable() catch |e| switch (e) {
+            error.HandlerFailed => |e_| return e_,
+        }) {
+            .will_notify => {},
+            .is_readable => {
+                @panic("TODO");
+            },
+        };
     }
 
     fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!void {
@@ -142,10 +149,7 @@ const INotifyBackend = struct {
         }
     }
 
-    fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator) (std.posix.ReadError || error{ ThespianFileDescriptorWaitReadFailed, NoSpaceLeft, OutOfMemory, Exit })!void {
-        // re-arm the file_discriptor
-        try self.fd_watcher.wait_read();
-
+    fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, HandlerFailed })!void {
         const InotifyEvent = extern struct {
             wd: i32,
             mask: u32,
@@ -164,7 +168,7 @@ const INotifyBackend = struct {
         defer {
             // Any unpaired MOVED_FROM means the file was moved out of the watched tree.
             for (pending_renames.items) |r| {
-                self.handler.vtable.change(r.path, EventType.deleted) catch {};
+                self.handler.change(r.path, EventType.deleted) catch {};
                 allocator.free(r.path);
             }
             pending_renames.deinit(allocator);
@@ -172,7 +176,11 @@ const INotifyBackend = struct {
 
         while (true) {
             const n = std.posix.read(self.inotify_fd, &buf) catch |e| switch (e) {
-                error.WouldBlock => break,
+                error.WouldBlock => {
+                    // re-arm the file_discriptor
+                    try self.arm(allocator);
+                    break;
+                },
                 else => return e,
             };
             var offset: usize = 0;
@@ -211,14 +219,14 @@ const INotifyBackend = struct {
                         // Complete rename pair: emit a single atomic rename message.
                         const r = pending_renames.swapRemove(i);
                         defer allocator.free(r.path);
-                        try self.handler.vtable.rename(r.path, full_path);
+                        try self.handler.rename(r.path, full_path);
                     } else {
                         // No paired MOVED_FROM, file was moved in from outside the watched tree.
-                        try self.handler.vtable.change(full_path, EventType.created);
+                        try self.handler.change(full_path, EventType.created);
                     }
                 } else if (ev.mask & IN.MOVE_SELF != 0) {
                     // The watched directory itself was renamed/moved away.
-                    try self.handler.vtable.change(full_path, EventType.deleted);
+                    try self.handler.change(full_path, EventType.deleted);
                 } else {
                     const event_type: EventType = if (ev.mask & IN.CREATE != 0)
                         if (ev.mask & IN.ISDIR != 0) .dir_created else .created
@@ -228,7 +236,7 @@ const INotifyBackend = struct {
                         .modified
                     else
                         continue;
-                    try self.handler.vtable.change(full_path, event_type);
+                    try self.handler.change(full_path, event_type);
                 }
             }
         }
