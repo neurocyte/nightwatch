@@ -333,7 +333,7 @@ const FSEventsBackend = struct {
         self.watches.deinit(allocator);
     }
 
-    fn arm(self: *@This(), allocator: std.mem.Allocator) error{OutOfMemory}!void {
+    fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, ArmFailed }!void {
         if (self.stream != null) return;
 
         var cf_strings: std.ArrayListUnmanaged(?*anyopaque) = .empty;
@@ -361,7 +361,7 @@ const FSEventsBackend = struct {
             cf_strings.items.ptr,
             @intCast(cf_strings.items.len),
             null,
-        ) orelse return;
+        ) orelse return error.ArmFailed;
         defer cf.CFRelease(paths_array);
 
         const ctx = try allocator.create(CallbackContext);
@@ -376,7 +376,7 @@ const FSEventsBackend = struct {
             kFSEventStreamEventIdSinceNow,
             0.1,
             kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents,
-        ) orelse return;
+        ) orelse return error.ArmFailed;
         errdefer cf.FSEventStreamRelease(stream);
 
         const queue = cf.dispatch_queue_create("flow.file_watcher", null);
@@ -493,6 +493,7 @@ const KQueueBackend = struct {
         self.watches.deinit(allocator);
         var sit = self.snapshots.iterator();
         while (sit.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
             var names = entry.value_ptr.*;
             var nit = names.iterator();
             while (nit.next()) |ne| allocator.free(ne.key_ptr.*);
@@ -705,6 +706,7 @@ const WindowsBackend = struct {
         pub extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const windows.WCHAR) callconv(.winapi) windows.DWORD;
     };
 
+    handler: *Handler,
     iocp: windows.HANDLE,
     thread: ?std.Thread,
     watches: std.StringHashMapUnmanaged(Watch),
@@ -743,9 +745,9 @@ const WindowsBackend = struct {
         0x00000010 | // FILE_NOTIFY_CHANGE_LAST_WRITE
         0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
-    fn init() windows.CreateIoCompletionPortError!@This() {
+    fn init(handler: *Handler) windows.CreateIoCompletionPortError!@This() {
         const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
-        return .{ .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = .{} };
+        return .{ .handler = handler, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = .{} };
     }
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -828,14 +830,18 @@ const WindowsBackend = struct {
                             offset += info.NextEntryOffset;
                             continue;
                         } else event_type;
+                        // Capture next_entry_offset before releasing the mutex: after unlock,
+                        // the main thread may call remove_watch() which frees w.buf, making
+                        // the `info` pointer (which points into w.buf) a dangling reference.
+                        const next_entry_offset = info.NextEntryOffset;
                         watches_mutex.unlock();
                         handler.change(full_path, adjusted_event_type) catch {
                             watches_mutex.lock();
                             break;
                         };
                         watches_mutex.lock();
-                        if (info.NextEntryOffset == 0) break;
-                        offset += info.NextEntryOffset;
+                        if (next_entry_offset == 0) break;
+                        offset += next_entry_offset;
                     }
                 }
                 // Re-arm ReadDirectoryChangesW for the next batch.
