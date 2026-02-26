@@ -18,6 +18,7 @@ pub const Error = error{
     HandlerFailed,
     SpawnFailed,
     OutOfMemory,
+    WatchFailed,
 };
 const SpawnError = error{ OutOfMemory, SpawnFailed };
 
@@ -67,7 +68,7 @@ pub fn deinit(self: *@This()) void {
 /// Watch a path (file or directory) for changes. The handler will receive
 /// `change` and (linux only) `rename` calls
 pub fn watch(self: *@This(), path: []const u8) Error!void {
-    self.backend.add_watch(self.allocator, path) catch |e| std.log.err("nightwatch.watch: {}", .{e});
+    return self.backend.add_watch(self.allocator, path);
 }
 
 /// Stop watching a previously watched path
@@ -126,11 +127,17 @@ const INotifyBackend = struct {
         };
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed }!void {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
         const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
-        if (wd < 0) return error.FileWatcherFailed;
+        switch (std.posix.errno(wd)) {
+            .SUCCESS => {},
+            else => |e| {
+                std.log.err("nightwatch.add_watch failed: {t}", .{e});
+                return error.WatchFailed;
+            },
+        }
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         const result = try self.watches.getOrPut(allocator, @intCast(wd));
