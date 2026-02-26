@@ -3,7 +3,17 @@
     .version = "0.1.0",
     .fingerprint = 0xb88932861fde7cb9,
     .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
+    .dependencies = .{
+        .flags = .{
+            .url = "git+https://github.com/neurocyte/flags?ref=main#984b27948da3e4e40a253f76c85b51ec1a9ada11",
+            .hash = "flags-0.10.0-a_9h3gB4AADAYn0XaZuUqH1jKRmy6dqvAIbomtTIF6V1",
+        },
+        .@"xcode-frameworks" = .{
+            .url = "git+https://github.com/hexops/xcode-frameworks?ref=main#8a1cfb373587ea4c9bb1468b7c986462d8d4e10e",
+            .hash = "N-V-__8AALShqgXkvqYU6f__FrA22SMWmi2TXCJjNTO1m8XJ",
+            .lazy = true,
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
