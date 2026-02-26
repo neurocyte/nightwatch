@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 pub const EventType = enum {
     created,
@@ -80,7 +81,7 @@ pub fn handle_read_ready(self: *@This()) !void {
 
 const Backend = switch (builtin.os.tag) {
     .linux => INotifyBackend,
-    .macos => FSEventsBackend,
+    .macos => if (build_options.use_fsevents) FSEventsBackend else KQueueBackend,
     .freebsd => KQueueBackend,
     .windows => WindowsBackend,
     else => @compileError("file_watcher: unsupported OS"),

@@ -4,10 +4,31 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_fsevents = if (target.result.os.tag == .macos) blk: {
+        break :blk b.option(
+            bool,
+            "use_fsevents",
+            "Use the FSEvents backend on macOS instead of kqueue (requires Xcode frameworks)",
+        ) orelse false;
+    } else false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "use_fsevents", use_fsevents);
+
     const mod = b.addModule("nightwatch", .{
         .root_source_file = b.path("src/nightwatch.zig"),
         .target = target,
     });
+    mod.addOptions("build_options", options);
+
+    if (use_fsevents) {
+        const xcode_frameworks = b.lazyDependency("xcode-frameworks", .{}) orelse
+            @panic("xcode-frameworks dependency not available");
+        mod.addSystemFrameworkPath(xcode_frameworks.path("Frameworks"));
+        mod.addLibraryPath(xcode_frameworks.path("lib"));
+        mod.linkFramework("CoreServices", .{});
+        mod.linkFramework("CoreFoundation", .{});
+    }
 
     const exe = b.addExecutable(.{
         .name = "nightwatch",
@@ -47,6 +68,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/nightwatch_test.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nightwatch", .module = mod },
+            },
         }),
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
