@@ -616,9 +616,38 @@ const KQueueBackend = struct {
         }
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) !void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory }!void {
         if (self.watches.contains(path)) return;
-        const path_fd = try std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0);
+        const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
+            error.AccessDenied,
+            error.PermissionDenied,
+            error.PathAlreadyExists,
+            error.SymLinkLoop,
+            error.NameTooLong,
+            error.FileNotFound,
+            error.SystemResources,
+            error.NoSpaceLeft,
+            error.NotDir,
+            error.InvalidUtf8,
+            error.InvalidWtf8,
+            error.BadPathName,
+            error.NoDevice,
+            error.NetworkNotFound,
+            error.Unexpected,
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            error.ProcessNotFound,
+            error.FileTooBig,
+            error.IsDir,
+            error.DeviceBusy,
+            error.FileLocksNotSupported,
+            error.FileBusy,
+            error.WouldBlock,
+            => |e_| {
+                std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
+                return error.WatchFailed;
+            },
+        };
         errdefer std.posix.close(path_fd);
         const kev = std.posix.Kevent{
             .ident = @intCast(path_fd),
@@ -628,12 +657,33 @@ const KQueueBackend = struct {
             .data = 0,
             .udata = 0,
         };
-        _ = try std.posix.kevent(self.kq, &.{kev}, &.{}, null);
+        _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch |e| switch (e) {
+            error.AccessDenied,
+            error.SystemResources,
+            error.EventNotFound,
+            error.ProcessNotFound,
+            error.Overflow,
+            => |e_| {
+                std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
+                return error.WatchFailed;
+            },
+        };
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         try self.watches.put(allocator, owned_path, path_fd);
         // Take initial snapshot so first NOTE_WRITE has a baseline to diff against.
-        try self.take_snapshot(allocator, owned_path);
+        self.take_snapshot(allocator, owned_path) catch |e| switch (e) {
+            error.AccessDenied,
+            error.PermissionDenied,
+            error.SystemResources,
+            error.InvalidUtf8,
+            error.Unexpected,
+            => |e_| {
+                std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
+                return error.WatchFailed;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
     }
 
     fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
