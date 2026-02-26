@@ -16,11 +16,9 @@ pub const EventType = enum {
 
 pub const Error = error{
     HandlerFailed,
-    SpawnFailed,
     OutOfMemory,
     WatchFailed,
 };
-const SpawnError = error{ OutOfMemory, SpawnFailed };
 
 pub const Handler = struct {
     vtable: *const VTable,
