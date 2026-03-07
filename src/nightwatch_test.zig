@@ -197,7 +197,7 @@ test "creating a file emits a 'created' event" {
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    const file_path = try std.fmt.allocPrint(allocator, "{s}/hello.txt", .{tmp});
+    const file_path = try std.fs.path.join(allocator, &.{ tmp, "hello.txt" });
     defer allocator.free(file_path);
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
@@ -222,7 +222,7 @@ test "writing to a file emits a 'modified' event" {
     defer th.deinit();
 
     // Create the file before setting up the watcher to start from a clean slate.
-    const file_path = try std.fmt.allocPrint(allocator, "{s}/data.txt", .{tmp});
+    const file_path = try std.fs.path.join(allocator, &.{ tmp, "data.txt" });
     defer allocator.free(file_path);
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
@@ -256,7 +256,7 @@ test "deleting a file emits a 'deleted' event" {
     const th = try TestHandler.init(allocator);
     defer th.deinit();
 
-    const file_path = try std.fmt.allocPrint(allocator, "{s}/gone.txt", .{tmp});
+    const file_path = try std.fs.path.join(allocator, &.{ tmp, "gone.txt" });
     defer allocator.free(file_path);
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
@@ -290,7 +290,7 @@ test "creating a sub-directory emits a 'dir_created' event" {
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/subdir", .{tmp});
+    const dir_path = try std.fs.path.join(allocator, &.{ tmp, "subdir" });
     defer allocator.free(dir_path);
     try std.fs.makeDirAbsolute(dir_path);
 
