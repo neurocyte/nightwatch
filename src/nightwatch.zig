@@ -75,9 +75,11 @@ pub fn deinit(self: *@This()) void {
 /// all subdirectories are watched recursively and new directories created
 /// inside are watched automatically.
 pub fn watch(self: *@This(), path: []const u8) Error!void {
-    try self.interceptor.backend.add_watch(self.allocator, path);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_path = std.fs.cwd().realpath(path, &buf) catch return error.WatchFailed;
+    try self.interceptor.backend.add_watch(self.allocator, abs_path);
     if (!Backend.watches_recursively) {
-        recurse_watch(&self.interceptor.backend, self.allocator, path);
+        recurse_watch(&self.interceptor.backend, self.allocator, abs_path);
     }
 }
 
