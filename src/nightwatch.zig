@@ -538,6 +538,13 @@ const KQueueBackend = struct {
     const NOTE_RENAME: u32 = 0x00000020;
 
     fn init(handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
+        // Per-file kqueue watches require one open fd per watched file.  Bump
+        // the soft NOFILE limit to the hard limit so large directory trees don't
+        // exhaust the default quota (256 on macOS, 1024 on many FreeBSD installs).
+        if (std.posix.getrlimit(.NOFILE)) |rl| {
+            if (rl.cur < rl.max)
+                std.posix.setrlimit(.NOFILE, .{ .cur = rl.max, .max = rl.max }) catch {};
+        } else |_| {}
         const kq = try std.posix.kqueue();
         errdefer std.posix.close(kq);
         const pipe = try std.posix.pipe();
