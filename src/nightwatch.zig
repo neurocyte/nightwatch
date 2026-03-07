@@ -75,8 +75,17 @@ pub fn deinit(self: *@This()) void {
 /// all subdirectories are watched recursively and new directories created
 /// inside are watched automatically.
 pub fn watch(self: *@This(), path: []const u8) Error!void {
+    // Make the path absolute without resolving symlinks so that callers who
+    // pass "/tmp/foo" (where /tmp is a symlink) receive events with the same
+    // "/tmp/foo" prefix rather than the resolved "/private/tmp/foo" prefix.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_path = std.fs.cwd().realpath(path, &buf) catch return error.WatchFailed;
+    const abs_path: []const u8 = if (std.fs.path.isAbsolute(path))
+        path
+    else blk: {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return error.WatchFailed;
+        break :blk std.fmt.bufPrint(&buf, "{s}/{s}", .{ cwd, path }) catch return error.WatchFailed;
+    };
     try self.interceptor.backend.add_watch(self.allocator, abs_path);
     if (!Backend.watches_recursively) {
         recurse_watch(&self.interceptor.backend, self.allocator, abs_path);
