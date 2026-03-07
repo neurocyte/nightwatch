@@ -99,7 +99,7 @@ fn usage(out: std.fs.File) !void {
     try writer.interface.print(
         \\Usage: nightwatch <path> [<path> ...]
         \\
-        \\Watch files and directories for changes. Press Ctrl-C to stop.
+        \\The Watch never sleeps.
         \\
         \\Events printed to stdout:
         \\  create    a file was created
@@ -107,6 +107,8 @@ fn usage(out: std.fs.File) !void {
         \\  delete    a file or directory was deleted
         \\  mkdir     a directory was created
         \\  rename    a file or directory was renamed
+        \\
+        \\Stand down with Ctrl-C.
         \\
     , .{});
     try writer.interface.flush();
@@ -160,7 +162,7 @@ pub fn main() !void {
         watcher.watch(path) catch |err| {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
         };
-        try stderr.interface.print("watching: {s}\n", .{path});
+        try stderr.interface.print("on watch: {s}\n", .{path});
     }
 
     if (builtin.os.tag == .linux) {
