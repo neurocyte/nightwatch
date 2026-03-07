@@ -161,6 +161,7 @@ pub fn main() !void {
     for (args[1..]) |path| {
         watcher.watch(path) catch |err| {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
+            continue;
         };
         try stderr.interface.print("on watch: {s}\n", .{path});
     }

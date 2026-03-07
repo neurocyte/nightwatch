@@ -6,9 +6,8 @@ pub const EventType = enum {
     created,
     modified,
     deleted,
-    /// A new directory was created inside a watched directory. The
-    /// receiver should call watch() on the path to get events for files
-    /// created in it.
+    /// A new directory was created inside a watched directory.
+    /// The library automatically begins watching it; no action is required.
     dir_created,
     /// Only produced on macOS and Windows where the OS gives no pairing info.
     /// On Linux, paired renames are emitted as a { "FW", "rename", from, to } message instead.
@@ -49,13 +48,19 @@ pub const ReadableStatus = enum {
 };
 
 allocator: std.mem.Allocator,
+interceptor: Interceptor,
 backend: Backend,
 
 pub fn init(allocator: std.mem.Allocator, handler: *Handler) !@This() {
-    var self: @This() = .{
+    var self: @This() = undefined;
+    self.allocator = allocator;
+    self.interceptor = .{
+        .handler = .{ .vtable = &Interceptor.vtable },
+        .user_handler = handler,
+        .backend_ptr = &self.backend,
         .allocator = allocator,
-        .backend = try Backend.init(handler),
     };
+    self.backend = try Backend.init(&self.interceptor.handler);
     try self.backend.arm(self.allocator);
     return self;
 }
@@ -65,9 +70,14 @@ pub fn deinit(self: *@This()) void {
 }
 
 /// Watch a path (file or directory) for changes. The handler will receive
-/// `change` and (linux only) `rename` calls
+/// `change` and (linux only) `rename` calls. When path is a directory,
+/// all subdirectories are watched recursively and new directories created
+/// inside are watched automatically.
 pub fn watch(self: *@This(), path: []const u8) Error!void {
-    return self.backend.add_watch(self.allocator, path);
+    try self.backend.add_watch(self.allocator, path);
+    if (!Backend.watches_recursively) {
+        recurse_watch(&self.backend, self.allocator, path);
+    }
 }
 
 /// Stop watching a previously watched path
@@ -86,6 +96,54 @@ pub fn poll_fd(self: *const @This()) std.posix.fd_t {
     return self.backend.inotify_fd;
 }
 
+// Wraps the user's handler to intercept dir_created events and auto-watch
+// new directories before forwarding to the user.
+const Interceptor = struct {
+    handler: Handler,
+    user_handler: *Handler,
+    backend_ptr: *Backend,
+    allocator: std.mem.Allocator,
+
+    const vtable = Handler.VTable{
+        .change = change_cb,
+        .rename = rename_cb,
+        .wait_readable = if (builtin.os.tag == .linux) wait_readable_cb else {},
+    };
+
+    fn change_cb(h: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void {
+        const self: *Interceptor = @fieldParentPtr("handler", h);
+        if (event_type == .dir_created and !Backend.watches_recursively) {
+            self.backend_ptr.add_watch(self.allocator, path) catch {};
+            recurse_watch(self.backend_ptr, self.allocator, path);
+        }
+        return self.user_handler.change(path, event_type);
+    }
+
+    fn rename_cb(h: *Handler, src: []const u8, dst: []const u8) error{HandlerFailed}!void {
+        const self: *Interceptor = @fieldParentPtr("handler", h);
+        return self.user_handler.rename(src, dst);
+    }
+
+    fn wait_readable_cb(h: *Handler) error{HandlerFailed}!ReadableStatus {
+        const self: *Interceptor = @fieldParentPtr("handler", h);
+        return self.user_handler.wait_readable();
+    }
+};
+
+// Scans subdirectories of dir_path and adds a watch for each one, recursively.
+fn recurse_watch(backend: *Backend, allocator: std.mem.Allocator, dir_path: []const u8) void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch return) |entry| {
+        if (entry.kind != .directory) continue;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const sub = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        backend.add_watch(allocator, sub) catch {};
+        recurse_watch(backend, allocator, sub);
+    }
+}
+
 const Backend = switch (builtin.os.tag) {
     .linux => INotifyBackend,
     .macos => if (build_options.use_fsevents) FSEventsBackend else KQueueBackend,
@@ -95,6 +153,8 @@ const Backend = switch (builtin.os.tag) {
 };
 
 const INotifyBackend = struct {
+    const watches_recursively = false;
+
     handler: *Handler,
     inotify_fd: std.posix.fd_t,
     watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
@@ -254,6 +314,8 @@ const INotifyBackend = struct {
 };
 
 const FSEventsBackend = struct {
+    const watches_recursively = true; // FSEventStreamCreate watches the entire subtree
+
     handler: *Handler,
     stream: ?*anyopaque, // FSEventStreamRef
     queue: ?*anyopaque, // dispatch_queue_t
@@ -442,6 +504,8 @@ const FSEventsBackend = struct {
 };
 
 const KQueueBackend = struct {
+    const watches_recursively = false;
+
     handler: *Handler,
     kq: std.posix.fd_t,
     shutdown_pipe: [2]std.posix.fd_t, // [0]=read [1]=write; write a byte to wake the thread
@@ -785,6 +849,8 @@ const KQueueBackend = struct {
 };
 
 const WindowsBackend = struct {
+    const watches_recursively = true; // ReadDirectoryChangesW with bWatchSubtree=1
+
     const windows = std.os.windows;
 
     const win32 = struct {
