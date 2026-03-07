@@ -971,16 +971,11 @@ const WindowsBackend = struct {
         }
     }
 
-    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) (windows.CreateIoCompletionPortError || error{
-        InvalidUtf8,
-        OutOfMemory,
-        FileWatcherInvalidHandle,
-        FileWatcherReadDirectoryChangesFailed,
-    })!void {
+    fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed }!void {
         self.watches_mutex.lock();
         defer self.watches_mutex.unlock();
         if (self.watches.contains(path)) return;
-        const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+        const path_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, path) catch return error.WatchFailed;
         defer allocator.free(path_w);
         const handle = win32.CreateFileW(
             path_w,
@@ -991,16 +986,16 @@ const WindowsBackend = struct {
             0x02000000 | 0x40000000, // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED
             null,
         );
-        if (handle == windows.INVALID_HANDLE_VALUE) return error.FileWatcherInvalidHandle;
+        if (handle == windows.INVALID_HANDLE_VALUE) return error.WatchFailed;
         errdefer _ = win32.CloseHandle(handle);
-        _ = try windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0);
+        _ = windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0) catch return error.WatchFailed;
         const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4), buf_size);
         errdefer allocator.free(buf);
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
         if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &overlapped, null) == 0)
-            return error.FileWatcherReadDirectoryChangesFailed;
+            return error.WatchFailed;
         try self.watches.put(allocator, owned_path, .{
             .handle = handle,
             .buf = buf,

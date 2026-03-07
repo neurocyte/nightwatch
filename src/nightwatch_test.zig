@@ -148,7 +148,11 @@ fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
     const name = try std.fmt.allocPrint(
         allocator,
         "/tmp/nightwatch_test_{d}_{d}",
-        .{ if (builtin.os.tag == .linux) std.os.linux.getpid() else std.c.getpid(), n },
+        .{ switch (builtin.os.tag) {
+            .linux => std.os.linux.getpid(),
+            .windows => std.os.windows.GetCurrentProcessId(),
+            else => std.c.getpid(),
+        }, n },
     );
     errdefer allocator.free(name);
     try std.fs.makeDirAbsolute(name);

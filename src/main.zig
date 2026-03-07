@@ -72,6 +72,27 @@ fn run_posix() void {
     _ = std.posix.read(sig_pipe[0], &buf) catch {};
 }
 
+var win_shutdown = std.atomic.Value(bool).init(false);
+
+fn win_ctrl_handler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+    _ = ctrl_type;
+    win_shutdown.store(true, .release);
+    return std.os.windows.TRUE;
+}
+
+fn run_windows() void {
+    const SetConsoleCtrlHandler = struct {
+        extern "kernel32" fn SetConsoleCtrlHandler(
+            HandlerRoutine: ?*const fn (std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL,
+            Add: std.os.windows.BOOL,
+        ) callconv(.winapi) std.os.windows.BOOL;
+    }.SetConsoleCtrlHandler;
+    _ = SetConsoleCtrlHandler(win_ctrl_handler, std.os.windows.TRUE);
+    while (!win_shutdown.load(.acquire)) {
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+}
+
 fn usage(out: std.fs.File) !void {
     var buf: [4096]u8 = undefined;
     var writer = out.writer(&buf);
@@ -144,6 +165,8 @@ pub fn main() !void {
 
     if (builtin.os.tag == .linux) {
         try run_linux(&watcher);
+    } else if (builtin.os.tag == .windows) {
+        run_windows();
     } else if (is_posix) {
         run_posix();
     }
