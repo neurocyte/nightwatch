@@ -79,6 +79,13 @@ pub fn handle_read_ready(self: *@This()) !void {
     try self.backend.handle_read_ready(self.allocator);
 }
 
+/// Returns the inotify file descriptor that should be polled for POLLIN
+/// before calling handle_read_ready(). Only available on Linux.
+pub fn poll_fd(self: *const @This()) std.posix.fd_t {
+    comptime if (builtin.os.tag != .linux) @compileError("poll_fd is only available on Linux");
+    return self.backend.inotify_fd;
+}
+
 const Backend = switch (builtin.os.tag) {
     .linux => INotifyBackend,
     .macos => if (build_options.use_fsevents) FSEventsBackend else KQueueBackend,
