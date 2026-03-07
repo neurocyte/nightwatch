@@ -691,16 +691,24 @@ const KQueueBackend = struct {
         defer to_create.deinit(allocator);
         var to_delete: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_delete.deinit(allocator);
-        var new_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer new_dirs.deinit(allocator);
+        var new_dirs: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (new_dirs.items) |p| allocator.free(p);
+            new_dirs.deinit(allocator);
+        }
 
         self.snapshots_mutex.lock();
         {
             for (current_dirs.items) |name| {
                 var path_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
-                if (!self.snapshots.contains(full_path))
-                    try new_dirs.append(allocator, full_path);
+                if (!self.snapshots.contains(full_path)) {
+                    const owned = allocator.dupe(u8, full_path) catch continue;
+                    new_dirs.append(allocator, owned) catch {
+                        allocator.free(owned);
+                        continue;
+                    };
+                }
             }
 
             const gop = self.snapshots.getOrPut(allocator, dir_path) catch |e| {
