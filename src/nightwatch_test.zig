@@ -145,15 +145,18 @@ var temp_dir_counter = std.atomic.Value(u32).init(0);
 /// Create a fresh temporary directory and return its absolute path (caller frees).
 fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
     const n = temp_dir_counter.fetchAdd(1, .monotonic);
-    const name = try std.fmt.allocPrint(
-        allocator,
-        "/tmp/nightwatch_test_{d}_{d}",
-        .{ switch (builtin.os.tag) {
-            .linux => std.os.linux.getpid(),
-            .windows => std.os.windows.GetCurrentProcessId(),
-            else => std.c.getpid(),
-        }, n },
-    );
+    const pid = switch (builtin.os.tag) {
+        .linux => std.os.linux.getpid(),
+        .windows => std.os.windows.GetCurrentProcessId(),
+        else => std.c.getpid(),
+    };
+    const name = if (builtin.os.tag == .windows) blk: {
+        const tmp_dir = std.process.getEnvVarOwned(allocator, "TEMP") catch
+            try std.process.getEnvVarOwned(allocator, "TMP");
+        defer allocator.free(tmp_dir);
+        break :blk try std.fmt.allocPrint(allocator, "{s}\\nightwatch_test_{d}_{d}", .{ tmp_dir, pid, n });
+    } else
+        try std.fmt.allocPrint(allocator, "/tmp/nightwatch_test_{d}_{d}", .{ pid, n });
     errdefer allocator.free(name);
     try std.fs.makeDirAbsolute(name);
     return name;
