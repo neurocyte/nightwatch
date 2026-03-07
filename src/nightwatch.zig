@@ -48,25 +48,26 @@ pub const ReadableStatus = enum {
 };
 
 allocator: std.mem.Allocator,
-interceptor: Interceptor,
-backend: Backend,
+interceptor: *Interceptor,
 
 pub fn init(allocator: std.mem.Allocator, handler: *Handler) !@This() {
-    var self: @This() = undefined;
-    self.allocator = allocator;
-    self.interceptor = .{
+    const ic = try allocator.create(Interceptor);
+    errdefer allocator.destroy(ic);
+    ic.* = .{
         .handler = .{ .vtable = &Interceptor.vtable },
         .user_handler = handler,
-        .backend_ptr = &self.backend,
         .allocator = allocator,
+        .backend = undefined,
     };
-    self.backend = try Backend.init(&self.interceptor.handler);
-    try self.backend.arm(self.allocator);
-    return self;
+    ic.backend = try Backend.init(&ic.handler);
+    errdefer ic.backend.deinit(allocator);
+    try ic.backend.arm(allocator);
+    return .{ .allocator = allocator, .interceptor = ic };
 }
 
 pub fn deinit(self: *@This()) void {
-    self.backend.deinit(self.allocator);
+    self.interceptor.backend.deinit(self.allocator);
+    self.allocator.destroy(self.interceptor);
 }
 
 /// Watch a path (file or directory) for changes. The handler will receive
@@ -74,35 +75,37 @@ pub fn deinit(self: *@This()) void {
 /// all subdirectories are watched recursively and new directories created
 /// inside are watched automatically.
 pub fn watch(self: *@This(), path: []const u8) Error!void {
-    try self.backend.add_watch(self.allocator, path);
+    try self.interceptor.backend.add_watch(self.allocator, path);
     if (!Backend.watches_recursively) {
-        recurse_watch(&self.backend, self.allocator, path);
+        recurse_watch(&self.interceptor.backend, self.allocator, path);
     }
 }
 
 /// Stop watching a previously watched path
 pub fn unwatch(self: *@This(), path: []const u8) void {
-    self.backend.remove_watch(self.allocator, path);
+    self.interceptor.backend.remove_watch(self.allocator, path);
 }
 
 pub fn handle_read_ready(self: *@This()) !void {
-    try self.backend.handle_read_ready(self.allocator);
+    try self.interceptor.backend.handle_read_ready(self.allocator);
 }
 
 /// Returns the inotify file descriptor that should be polled for POLLIN
 /// before calling handle_read_ready(). Only available on Linux.
 pub fn poll_fd(self: *const @This()) std.posix.fd_t {
     comptime if (builtin.os.tag != .linux) @compileError("poll_fd is only available on Linux");
-    return self.backend.inotify_fd;
+    return self.interceptor.backend.inotify_fd;
 }
 
 // Wraps the user's handler to intercept dir_created events and auto-watch
 // new directories before forwarding to the user.
+// Heap-allocated so that &ic.handler stays valid regardless of how the
+// nightwatch struct is moved after init() returns.
 const Interceptor = struct {
     handler: Handler,
     user_handler: *Handler,
-    backend_ptr: *Backend,
     allocator: std.mem.Allocator,
+    backend: Backend,
 
     const vtable = Handler.VTable{
         .change = change_cb,
@@ -113,8 +116,8 @@ const Interceptor = struct {
     fn change_cb(h: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void {
         const self: *Interceptor = @fieldParentPtr("handler", h);
         if (event_type == .dir_created and !Backend.watches_recursively) {
-            self.backend_ptr.add_watch(self.allocator, path) catch {};
-            recurse_watch(self.backend_ptr, self.allocator, path);
+            self.backend.add_watch(self.allocator, path) catch {};
+            recurse_watch(&self.backend, self.allocator, path);
         }
         return self.user_handler.change(path, event_type);
     }
