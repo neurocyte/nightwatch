@@ -233,6 +233,14 @@ const INotifyBackend = struct {
         }
     }
 
+    fn has_watch_for_path(self: *const @This(), path: []const u8) bool {
+        var it = self.watches.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr.*, path)) return true;
+        }
+        return false;
+    }
+
     fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, HandlerFailed })!void {
         const InotifyEvent = extern struct {
             wd: i32,
@@ -314,9 +322,14 @@ const INotifyBackend = struct {
                 } else {
                     const event_type: EventType = if (ev.mask & IN.CREATE != 0)
                         if (ev.mask & IN.ISDIR != 0) .dir_created else .created
-                    else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0)
-                        .deleted
-                    else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
+                    else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0) blk: {
+                        // Suppress IN_DELETE|IN_ISDIR for subdirs that have their
+                        // own watch: IN_DELETE_SELF on that watch will fire the
+                        // same path without duplication.
+                        if (ev.mask & IN.ISDIR != 0 and self.has_watch_for_path(full_path))
+                            continue;
+                        break :blk .deleted;
+                    } else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
                         .modified
                     else
                         continue;
