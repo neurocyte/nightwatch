@@ -4,10 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const use_fsevents = if (target.result.os.tag == .macos) blk: {
+    const macos_fsevents = if (target.result.os.tag == .macos) blk: {
         break :blk b.option(
             bool,
-            "use_fsevents",
+            "macos_fsevents",
             "Use the FSEvents backend on macOS instead of kqueue (requires Xcode frameworks)",
         ) orelse false;
     } else false;
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     ) orelse true;
 
     const options = b.addOptions();
-    options.addOption(bool, "use_fsevents", use_fsevents);
+    options.addOption(bool, "macos_fsevents", macos_fsevents);
     options.addOption(bool, "linux_read_thread", linux_read_thread);
     const options_mod = options.createModule();
 
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    if (use_fsevents) {
+    if (macos_fsevents) {
         const xcode_frameworks = b.lazyDependency("xcode-frameworks", .{}) orelse return;
         mod.addSystemFrameworkPath(xcode_frameworks.path("Frameworks"));
         mod.addLibraryPath(xcode_frameworks.path("lib"));

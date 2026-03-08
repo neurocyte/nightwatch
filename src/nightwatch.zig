@@ -174,7 +174,7 @@ fn recurse_watch(backend: *Backend, allocator: std.mem.Allocator, dir_path: []co
 
 const Backend = switch (builtin.os.tag) {
     .linux => INotifyBackend,
-    .macos => if (build_options.use_fsevents) FSEventsBackend else KQueueBackend,
+    .macos => if (build_options.macos_fsevents) FSEventsBackend else KQueueBackend,
     .freebsd => KQueueBackend,
     .windows => WindowsBackend,
     else => @compileError("file_watcher: unsupported OS"),
