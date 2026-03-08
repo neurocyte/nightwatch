@@ -33,13 +33,7 @@ pub const linux_poll_mode = builtin.os.tag == .linux and !build_options.linux_re
 /// True if the current backend detects file content modifications in real time.
 /// False only when kqueue_dir_only=true, where directory-level watches are used
 /// and file writes do not trigger a directory NOTE_WRITE event.
-pub const detects_file_modifications = switch (builtin.os.tag) {
-    .linux => true,
-    .macos => !build_options.kqueue_dir_only or build_options.macos_fsevents,
-    .freebsd, .openbsd, .netbsd, .dragonfly => !build_options.kqueue_dir_only,
-    .windows => true,
-    else => false,
-};
+pub const detects_file_modifications = Backend.detects_file_modifications;
 
 pub const Handler = struct {
     vtable: *const VTable,
@@ -198,6 +192,7 @@ const Backend = switch (builtin.os.tag) {
 
 const INotifyBackend = struct {
     const watches_recursively = false;
+    const detects_file_modifications = true;
 
     const PendingRename = struct {
         cookie: u32,
@@ -424,6 +419,7 @@ const INotifyBackend = struct {
 
 const FSEventsBackend = struct {
     const watches_recursively = true; // FSEventStreamCreate watches the entire subtree
+    const detects_file_modifications = true;
 
     handler: *Handler,
     stream: ?*anyopaque, // FSEventStreamRef
@@ -657,6 +653,7 @@ const FSEventsBackend = struct {
 
 const KQueueBackend = struct {
     const watches_recursively = false;
+    const detects_file_modifications = true;
 
     handler: *Handler,
     kq: std.posix.fd_t,
@@ -1081,6 +1078,7 @@ const KQueueBackend = struct {
 
 const KQueueDirBackend = struct {
     const watches_recursively = false;
+    const detects_file_modifications = false;
     const WatchEntry = struct { fd: std.posix.fd_t, is_file: bool };
 
     handler: *Handler,
@@ -1439,6 +1437,7 @@ const KQueueDirBackend = struct {
 
 const WindowsBackend = struct {
     const watches_recursively = true; // ReadDirectoryChangesW with bWatchSubtree=1
+    const detects_file_modifications = true;
 
     const windows = std.os.windows;
 
