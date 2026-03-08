@@ -21,7 +21,7 @@ const CliHandler = struct {
     const vtable = nightwatch.Handler.VTable{
         .change = change_cb,
         .rename = rename_cb,
-        .wait_readable = if (builtin.os.tag == .linux) wait_readable_cb else {},
+        .wait_readable = if (nightwatch.linux_poll_mode) wait_readable_cb else {},
     };
 
     fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType) error{HandlerFailed}!void {
@@ -166,7 +166,7 @@ pub fn main() !void {
         try stderr.interface.print("on watch: {s}\n", .{path});
     }
 
-    if (builtin.os.tag == .linux) {
+    if (nightwatch.linux_poll_mode) {
         try run_linux(&watcher);
     } else if (builtin.os.tag == .windows) {
         run_windows();

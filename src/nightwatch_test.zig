@@ -49,7 +49,7 @@ const TestHandler = struct {
     const vtable = nw.Handler.VTable{
         .change = change_cb,
         .rename = rename_cb,
-        .wait_readable = if (builtin.os.tag == .linux) wait_readable_cb else {},
+        .wait_readable = if (nw.linux_poll_mode) wait_readable_cb else {},
     };
 
     fn change_cb(handler: *nw.Handler, path: []const u8, event_type: nw.EventType) error{HandlerFailed}!void {
@@ -170,7 +170,7 @@ fn removeTempDir(path: []const u8) void {
 ///  - Linux:   call handle_read_ready() so inotify events are processed.
 ///  - Others:  the backend uses its own thread/callback; sleep briefly.
 fn drainEvents(watcher: *Watcher) !void {
-    if (builtin.os.tag == .linux) {
+    if (nw.linux_poll_mode) {
         try watcher.handle_read_ready();
     } else {
         std.Thread.sleep(300 * std.time.ns_per_ms);
