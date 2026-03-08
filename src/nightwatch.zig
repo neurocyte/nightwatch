@@ -188,9 +188,16 @@ const Backend = switch (builtin.os.tag) {
 const INotifyBackend = struct {
     const watches_recursively = false;
 
+    const PendingRename = struct {
+        cookie: u32,
+        path: []u8, // owned
+        object_type: ObjectType,
+    };
+
     handler: *Handler,
     inotify_fd: std.posix.fd_t,
     watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
+    pending_renames: std.ArrayListUnmanaged(PendingRename),
     // Used only in linux_read_thread mode:
     stop_pipe: if (build_options.linux_read_thread) [2]std.posix.fd_t else void,
     thread: if (build_options.linux_read_thread) ?std.Thread else void,
@@ -212,6 +219,7 @@ const INotifyBackend = struct {
                 .handler = handler,
                 .inotify_fd = inotify_fd,
                 .watches = .empty,
+                .pending_renames = .empty,
                 .stop_pipe = stop_pipe,
                 .thread = null,
             };
@@ -220,6 +228,7 @@ const INotifyBackend = struct {
                 .handler = handler,
                 .inotify_fd = inotify_fd,
                 .watches = .empty,
+                .pending_renames = .empty,
                 .stop_pipe = {},
                 .thread = {},
             };
@@ -237,6 +246,8 @@ const INotifyBackend = struct {
         var it = self.watches.iterator();
         while (it.next()) |entry| allocator.free(entry.value_ptr.*);
         self.watches.deinit(allocator);
+        for (self.pending_renames.items) |r| allocator.free(r.path);
+        self.pending_renames.deinit(allocator);
         std.posix.close(self.inotify_fd);
     }
 
@@ -312,22 +323,14 @@ const INotifyBackend = struct {
             len: u32,
         };
 
-        // A pending MOVED_FROM waiting to be paired with a MOVED_TO by cookie.
-        const PendingRename = struct {
-            cookie: u32,
-            path: []u8, // owned by drain's allocator
-            object_type: ObjectType,
-        };
-
-        var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
-        var pending_renames: std.ArrayListUnmanaged(PendingRename) = .empty;
+        var buf: [65536]u8 align(@alignOf(InotifyEvent)) = undefined;
         defer {
             // Any unpaired MOVED_FROM means the file was moved out of the watched tree.
-            for (pending_renames.items) |r| {
+            for (self.pending_renames.items) |r| {
                 self.handler.change(r.path, EventType.deleted, r.object_type) catch {};
                 allocator.free(r.path);
             }
-            pending_renames.deinit(allocator);
+            self.pending_renames.clearRetainingCapacity();
         }
 
         while (true) {
@@ -358,7 +361,7 @@ const INotifyBackend = struct {
 
                 if (ev.mask & IN.MOVED_FROM != 0) {
                     // Park it, we may receive a paired MOVED_TO with the same cookie.
-                    try pending_renames.append(allocator, .{
+                    try self.pending_renames.append(allocator, .{
                         .cookie = ev.cookie,
                         .path = try allocator.dupe(u8, full_path),
                         .object_type = if (ev.mask & IN.ISDIR != 0) .dir else .file,
@@ -366,7 +369,7 @@ const INotifyBackend = struct {
                 } else if (ev.mask & IN.MOVED_TO != 0) {
                     // Look for a paired MOVED_FROM.
                     var found: ?usize = null;
-                    for (pending_renames.items, 0..) |r, i| {
+                    for (self.pending_renames.items, 0..) |r, i| {
                         if (r.cookie == ev.cookie) {
                             found = i;
                             break;
@@ -374,7 +377,7 @@ const INotifyBackend = struct {
                     }
                     if (found) |i| {
                         // Complete rename pair: emit a single atomic rename message.
-                        const r = pending_renames.swapRemove(i);
+                        const r = self.pending_renames.swapRemove(i);
                         defer allocator.free(r.path);
                         try self.handler.rename(r.path, full_path, r.object_type);
                     } else {
