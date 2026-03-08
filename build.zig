@@ -18,9 +18,16 @@ pub fn build(b: *std.Build) void {
         "Use a background thread on Linux (like macOS/Windows) instead of requiring the caller to drive the event loop via poll_fd/handle_read_ready",
     ) orelse true;
 
+    const kqueue_dir_only = b.option(
+        bool,
+        "kqueue_dir_only",
+        "Use directory-only kqueue watches (lower fd usage, no real-time file modification detection). Default: false",
+    ) orelse false;
+
     const options = b.addOptions();
     options.addOption(bool, "macos_fsevents", macos_fsevents);
     options.addOption(bool, "linux_read_thread", linux_read_thread);
+    options.addOption(bool, "kqueue_dir_only", kqueue_dir_only);
     const options_mod = options.createModule();
 
     const mod = b.addModule("nightwatch", .{

@@ -221,6 +221,10 @@ test "creating a file emits a 'created' event" {
 }
 
 test "writing to a file emits a 'modified' event" {
+    // kqueue watches directories only; file writes don't trigger a directory event,
+    // so modifications are not reliably detectable in real time on this backend.
+    if (comptime !nw.detects_file_modifications) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
 
     const tmp = try makeTempDir(allocator);
@@ -512,6 +516,8 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
     // After renaming a file, a write to the new name should produce events in
     // the order [rename/old-name, rename/new-name, modify] so that a consumer
     // always knows the current identity of the file before seeing changes to it.
+    if (comptime !nw.detects_file_modifications) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
 
     const tmp = try makeTempDir(allocator);
