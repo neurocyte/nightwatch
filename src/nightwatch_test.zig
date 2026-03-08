@@ -311,9 +311,9 @@ test "renaming a file is reported correctly per-platform" {
     const th = try TestHandler.init(allocator);
     defer th.deinit();
 
-    const src_path = try std.fmt.allocPrint(allocator, "{s}/before.txt", .{tmp});
+    const src_path = try std.fs.path.join(allocator, &.{ tmp, "before.txt" });
     defer allocator.free(src_path);
-    const dst_path = try std.fmt.allocPrint(allocator, "{s}/after.txt", .{tmp});
+    const dst_path = try std.fs.path.join(allocator, &.{ tmp, "after.txt" });
     defer allocator.free(dst_path);
 
     {
@@ -361,7 +361,7 @@ test "an unwatched directory produces no events" {
     defer watcher.deinit();
     try watcher.watch(watched); // only watch the first dir
 
-    const file_path = try std.fmt.allocPrint(allocator, "{s}/silent.txt", .{unwatched});
+    const file_path = try std.fs.path.join(allocator, &.{ unwatched, "silent.txt" });
     defer allocator.free(file_path);
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
@@ -390,7 +390,7 @@ test "unwatch stops delivering events for that directory" {
     try watcher.watch(tmp);
 
     // Create a file while watching - should be reported.
-    const file1 = try std.fmt.allocPrint(allocator, "{s}/watched.txt", .{tmp});
+    const file1 = try std.fs.path.join(allocator, &.{ tmp, "watched.txt" });
     defer allocator.free(file1);
     {
         const f = try std.fs.createFileAbsolute(file1, .{});
@@ -403,7 +403,7 @@ test "unwatch stops delivering events for that directory" {
     watcher.unwatch(tmp);
     const count_before = th.events.items.len;
 
-    const file2 = try std.fmt.allocPrint(allocator, "{s}/after_unwatch.txt", .{tmp});
+    const file2 = try std.fs.path.join(allocator, &.{ tmp, "after_unwatch.txt" });
     defer allocator.free(file2);
     {
         const f = try std.fs.createFileAbsolute(file2, .{});
@@ -433,7 +433,9 @@ test "multiple files created sequentially all appear in the event list" {
     const N = 5;
     var paths: [N][]u8 = undefined;
     for (&paths, 0..) |*p, i| {
-        p.* = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{ tmp, i });
+        const name = try std.fmt.allocPrint(allocator, "file{d}.txt", .{i});
+        defer allocator.free(name);
+        p.* = try std.fs.path.join(allocator, &.{ tmp, name });
         const f = try std.fs.createFileAbsolute(p.*, .{});
         f.close();
     }
@@ -463,9 +465,9 @@ test "rename: old-name event precedes new-name event" {
     const th = try TestHandler.init(allocator);
     defer th.deinit();
 
-    const src_path = try std.fmt.allocPrint(allocator, "{s}/old.txt", .{tmp});
+    const src_path = try std.fs.path.join(allocator, &.{ tmp, "old.txt" });
     defer allocator.free(src_path);
-    const dst_path = try std.fmt.allocPrint(allocator, "{s}/new.txt", .{tmp});
+    const dst_path = try std.fs.path.join(allocator, &.{ tmp, "new.txt" });
     defer allocator.free(dst_path);
 
     {
@@ -506,9 +508,9 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
     const th = try TestHandler.init(allocator);
     defer th.deinit();
 
-    const src_path = try std.fmt.allocPrint(allocator, "{s}/original.txt", .{tmp});
+    const src_path = try std.fs.path.join(allocator, &.{ tmp, "original.txt" });
     defer allocator.free(src_path);
-    const dst_path = try std.fmt.allocPrint(allocator, "{s}/renamed.txt", .{tmp});
+    const dst_path = try std.fs.path.join(allocator, &.{ tmp, "renamed.txt" });
     defer allocator.free(dst_path);
 
     {
