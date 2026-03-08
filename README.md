@@ -35,12 +35,21 @@ It simply keeps watch.
 ## Features
 
 - Recursive directory tree tracking
-- Deterministic multi-platform support (Linux, FreeBSD, MacOS, Windows)
+- Deterministic multi-platform support (Linux, macOS, FreeBSD, OpenBSD, NetBSD, DragonFly BSD, Windows)
 - Lightweight and fast
 - Embeddable Zig module API
 - Standalone CLI executable
 
-------------------------------------------------------------------------
+### Platform backends
+
+| Platform                                | Backend                                                | Notes                                                              |
+| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| Linux                                   | inotify                                                | Threaded mode (default) or poll mode (`-Dlinux_read_thread=false`) |
+| macOS                                   | kqueue (default) or FSEvents (`-Dmacos_fsevents=true`) | FSEvents requires Xcode frameworks                                 |
+| FreeBSD, OpenBSD, NetBSD, DragonFly BSD | kqueue                                                 |                                                                    |
+| Windows                                 | ReadDirectoryChangesW                                  |                                                                    |
+
+---
 
 # Installation
 
