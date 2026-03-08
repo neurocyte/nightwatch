@@ -17,6 +17,7 @@ fn posix_sighandler(_: c_int) callconv(.c) void {
 const CliHandler = struct {
     handler: nightwatch.Handler,
     out: std.fs.File,
+    ignore: []const []const u8,
 
     const vtable = nightwatch.Handler.VTable{
         .change = change_cb,
@@ -26,6 +27,9 @@ const CliHandler = struct {
 
     fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
+        for (self.ignore) |ignored| {
+            if (std.mem.eql(u8, path, ignored)) return;
+        }
         var buf: [4096]u8 = undefined;
         var stdout = self.out.writer(&buf);
         defer stdout.interface.flush() catch {};
@@ -45,6 +49,9 @@ const CliHandler = struct {
 
     fn rename_cb(h: *nightwatch.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
+        for (self.ignore) |ignored| {
+            if (std.mem.eql(u8, src, ignored) or std.mem.eql(u8, dst, ignored)) return;
+        }
         var buf: [4096]u8 = undefined;
         var stdout = self.out.writer(&buf);
         defer stdout.interface.flush() catch {};
@@ -106,9 +113,13 @@ fn usage(out: std.fs.File) !void {
     var buf: [4096]u8 = undefined;
     var writer = out.writer(&buf);
     try writer.interface.print(
-        \\Usage: nightwatch <path> [<path> ...]
+        \\Usage: nightwatch [--ignore <path>]... <path> [<path> ...]
         \\
         \\The Watch never sleeps.
+        \\
+        \\Options:
+        \\  --ignore <path>   Suppress events whose path exactly matches <path>.
+        \\                    May be specified multiple times.
         \\
         \\Events printed to stdout (columns: event  type  path):
         \\  create    a file or directory was created
@@ -145,6 +156,44 @@ pub fn main() !void {
     var stderr = std.fs.File.stderr().writer(&buf);
     defer stderr.interface.flush() catch {};
 
+    // Parse --ignore options and watch paths.
+    // Ignored paths are made absolute (without resolving symlinks) so they
+    // match the absolute paths the backend emits in event callbacks.
+    var ignore_list = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (ignore_list.items) |p| allocator.free(p);
+        ignore_list.deinit(allocator);
+    }
+    var watch_paths = std.ArrayListUnmanaged([]const u8){};
+    defer watch_paths.deinit(allocator);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--ignore")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.interface.print("nightwatch: --ignore requires an argument\n", .{});
+                std.process.exit(1);
+            }
+            const raw = args[i];
+            const abs = if (std.fs.path.isAbsolute(raw))
+                try allocator.dupe(u8, raw)
+            else
+                try std.fs.path.join(allocator, &.{ cwd, raw });
+            try ignore_list.append(allocator, abs);
+        } else {
+            try watch_paths.append(allocator, args[i]);
+        }
+    }
+
+    if (watch_paths.items.len == 0) {
+        try usage(std.fs.File.stderr());
+        std.process.exit(1);
+    }
+
     if (is_posix) {
         sig_pipe = try std.posix.pipe();
         const sa = std.posix.Sigaction{
@@ -163,12 +212,13 @@ pub fn main() !void {
     var cli_handler = CliHandler{
         .handler = .{ .vtable = &CliHandler.vtable },
         .out = std.fs.File.stdout(),
+        .ignore = ignore_list.items,
     };
 
     var watcher = try nightwatch.init(allocator, &cli_handler.handler);
     defer watcher.deinit();
 
-    for (args[1..]) |path| {
+    for (watch_paths.items) |path| {
         watcher.watch(path) catch |err| {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
             continue;
