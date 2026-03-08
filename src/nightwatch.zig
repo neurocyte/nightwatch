@@ -1174,18 +1174,18 @@ const WindowsBackend = struct {
         }
         self.watches.deinit(allocator);
         var pt_it = self.path_types.iterator();
-        while (pt_it.next()) |entry| std.heap.page_allocator.free(entry.key_ptr.*);
-        self.path_types.deinit(std.heap.page_allocator);
+        while (pt_it.next()) |entry| allocator.free(entry.key_ptr.*);
+        self.path_types.deinit(allocator);
         _ = win32.CloseHandle(self.iocp);
     }
 
     fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} || std.Thread.SpawnError)!void {
-        _ = allocator;
         if (self.thread != null) return error.AlreadyArmed;
-        self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
+        self.thread = try std.Thread.spawn(.{}, thread_fn, .{ allocator, self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
     }
 
     fn thread_fn(
+        allocator: std.mem.Allocator,
         iocp: windows.HANDLE,
         watches: *std.StringHashMapUnmanaged(Watch),
         watches_mutex: *std.Thread.Mutex,
@@ -1233,7 +1233,10 @@ const WindowsBackend = struct {
                         const object_type: ObjectType = if (event_type == .deleted) blk: {
                             // Path no longer exists; use cached type if available.
                             const cached = path_types.fetchRemove(full_path);
-                            break :blk if (cached) |kv| kv.value else .unknown;
+                            break :blk if (cached) |kv| blk2: {
+                                allocator.free(kv.key);
+                                break :blk2 kv.value;
+                            } else .unknown;
                         } else blk: {
                             var full_path_w: [std.fs.max_path_bytes]windows.WCHAR = undefined;
                             const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk .unknown;
@@ -1244,8 +1247,14 @@ const WindowsBackend = struct {
                             const ot: ObjectType = if (attrs == INVALID) .unknown else if (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) .dir else .file;
                             // Cache the determined type.
                             if (ot != .unknown) {
-                                const owned_key = std.heap.page_allocator.dupe(u8, full_path) catch break :blk ot;
-                                path_types.put(std.heap.page_allocator, owned_key, ot) catch std.heap.page_allocator.free(owned_key);
+                                const gop = path_types.getOrPut(allocator, full_path) catch break :blk ot;
+                                if (!gop.found_existing) {
+                                    gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
+                                        _ = path_types.remove(full_path);
+                                        break :blk ot;
+                                    };
+                                }
+                                gop.value_ptr.* = ot;
                             }
                             break :blk ot;
                         };
