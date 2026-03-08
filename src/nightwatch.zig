@@ -795,43 +795,35 @@ const KQueueBackend = struct {
         var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
         defer dir.close();
 
+        // Arena for all temporaries — freed in one shot at the end.
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const tmp = arena.allocator();
+
         // Collect current files and subdirectories (no lock, reading filesystem only).
         var current_files: std.StringHashMapUnmanaged(void) = .empty;
-        defer {
-            var it = current_files.iterator();
-            while (it.next()) |e| allocator.free(e.key_ptr.*);
-            current_files.deinit(allocator);
-        }
         var current_dirs: std.ArrayListUnmanaged([]u8) = .empty;
-        defer {
-            for (current_dirs.items) |d| allocator.free(d);
-            current_dirs.deinit(allocator);
-        }
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             switch (entry.kind) {
                 .file => {
-                    const name = try allocator.dupe(u8, entry.name);
-                    try current_files.put(allocator, name, {});
+                    const name = try tmp.dupe(u8, entry.name);
+                    try current_files.put(tmp, name, {});
                 },
                 .directory => {
-                    const name = try allocator.dupe(u8, entry.name);
-                    try current_dirs.append(allocator, name);
+                    const name = try tmp.dupe(u8, entry.name);
+                    try current_dirs.append(tmp, name);
                 },
                 else => {},
             }
         }
 
         // Diff against snapshot under the lock; collect events to emit after releasing it.
+        // to_create / to_delete hold borrowed pointers into the snapshot (which uses
+        // allocator, not tmp); only the list metadata itself uses tmp.
         var to_create: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_create.deinit(allocator);
         var to_delete: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_delete.deinit(allocator);
-        var new_dirs: std.ArrayListUnmanaged([]u8) = .empty;
-        defer {
-            for (new_dirs.items) |p| allocator.free(p);
-            new_dirs.deinit(allocator);
-        }
+        var new_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
 
         self.snapshots_mutex.lock();
         {
@@ -839,11 +831,8 @@ const KQueueBackend = struct {
                 var path_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
                 if (!self.snapshots.contains(full_path)) {
-                    const owned = allocator.dupe(u8, full_path) catch continue;
-                    new_dirs.append(allocator, owned) catch {
-                        allocator.free(owned);
-                        continue;
-                    };
+                    const owned = tmp.dupe(u8, full_path) catch continue;
+                    new_dirs.append(tmp, owned) catch continue;
                 }
             }
 
@@ -866,13 +855,13 @@ const KQueueBackend = struct {
                     self.snapshots_mutex.unlock();
                     return e;
                 };
-                try to_create.append(allocator, owned);
+                try to_create.append(tmp, owned);
             }
 
             var sit = snapshot.iterator();
             while (sit.next()) |entry| {
                 if (current_files.contains(entry.key_ptr.*)) continue;
-                try to_delete.append(allocator, entry.key_ptr.*);
+                try to_delete.append(tmp, entry.key_ptr.*);
             }
             for (to_delete.items) |name| _ = snapshot.fetchRemove(name);
         }
@@ -891,7 +880,7 @@ const KQueueBackend = struct {
             };
             self.deregister_file_watch(allocator, full_path);
             try self.handler.change(full_path, EventType.deleted, .file);
-            allocator.free(name);
+            allocator.free(name); // snapshot key, owned by allocator
         }
         for (to_create.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -899,6 +888,7 @@ const KQueueBackend = struct {
             self.register_file_watch(allocator, full_path);
             try self.handler.change(full_path, EventType.created, .file);
         }
+        // arena.deinit() frees current_files, current_dirs, new_dirs, and list metadata
     }
 
     fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {

@@ -274,11 +274,13 @@ test "deleting a file emits a 'deleted' event" {
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    // Create the file after the watcher is active so the backend can cache its type.
+    // Create the file after the watcher is active so the backend can cache its type,
+    // then drain before deleting so the file lands in any snapshot before it disappears.
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
         f.close();
     }
+    try drainEvents(&watcher);
 
     try std.fs.deleteFileAbsolute(file_path);
 
