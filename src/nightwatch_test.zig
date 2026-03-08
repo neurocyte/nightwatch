@@ -155,10 +155,20 @@ fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
             try std.process.getEnvVarOwned(allocator, "TMP");
         defer allocator.free(tmp_dir);
         break :blk try std.fmt.allocPrint(allocator, "{s}\\nightwatch_test_{d}_{d}", .{ tmp_dir, pid, n });
-    } else
-        try std.fmt.allocPrint(allocator, "/tmp/nightwatch_test_{d}_{d}", .{ pid, n });
+    } else try std.fmt.allocPrint(allocator, "/tmp/nightwatch_test_{d}_{d}", .{ pid, n });
     errdefer allocator.free(name);
     try std.fs.makeDirAbsolute(name);
+    // On macOS /tmp is a symlink to /private/tmp; FSEvents always delivers
+    // canonical paths, so resolve now so all test-constructed paths match.
+    if (builtin.os.tag == .macos) {
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const real = std.fs.realpath(name, &real_buf) catch return name;
+        if (!std.mem.eql(u8, name, real)) {
+            const canon = try allocator.dupe(u8, real);
+            allocator.free(name);
+            return canon;
+        }
+    }
     return name;
 }
 

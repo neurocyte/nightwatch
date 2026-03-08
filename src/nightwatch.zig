@@ -419,6 +419,15 @@ const FSEventsBackend = struct {
     const kFSEventStreamEventIdSinceNow: u64 = 0xFFFFFFFFFFFFFFFF;
     const kCFStringEncodingUTF8: u32 = 0x08000100;
 
+    // Mirror of FSEventStreamContext (Apple SDK struct; version must be 0).
+    const FSEventStreamContext = extern struct {
+        version: isize = 0,
+        info: ?*anyopaque = null,
+        retain: ?*anyopaque = null,
+        release: ?*anyopaque = null,
+        copy_description: ?*anyopaque = null,
+    };
+
     const cf = struct {
         pub extern "c" fn CFStringCreateWithBytesNoCopy(
             alloc: ?*anyopaque,
@@ -438,7 +447,7 @@ const FSEventsBackend = struct {
         pub extern "c" fn FSEventStreamCreate(
             allocator: ?*anyopaque,
             callback: *const anyopaque,
-            context: ?*anyopaque,
+            context: *const FSEventStreamContext,
             pathsToWatch: *anyopaque,
             sinceWhen: u64,
             latency: f64,
@@ -456,6 +465,10 @@ const FSEventsBackend = struct {
 
     const CallbackContext = struct {
         handler: *Handler,
+        // Snapshot of the watched root paths at arm() time, used to filter out
+        // spurious events for the root directories themselves that FSEvents
+        // sometimes delivers as historical events at stream start.
+        watched_roots: []const []const u8, // owned slice of owned strings
     };
 
     fn init(handler: *Handler) error{}!@This() {
@@ -468,7 +481,7 @@ const FSEventsBackend = struct {
         };
     }
 
-    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    fn stop_stream(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.stream) |s| {
             cf.FSEventStreamStop(s);
             cf.FSEventStreamInvalidate(s);
@@ -480,9 +493,15 @@ const FSEventsBackend = struct {
             self.queue = null;
         }
         if (self.ctx) |c| {
+            for (c.watched_roots) |r| allocator.free(r);
+            allocator.free(c.watched_roots);
             allocator.destroy(c);
             self.ctx = null;
         }
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.stop_stream(allocator);
         var it = self.watches.iterator();
         while (it.next()) |entry| allocator.free(entry.key_ptr.*);
         self.watches.deinit(allocator);
@@ -490,6 +509,7 @@ const FSEventsBackend = struct {
 
     fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, ArmFailed }!void {
         if (self.stream != null) return;
+        if (self.watches.count() == 0) return; // no paths yet; will arm on first add_watch
 
         var cf_strings: std.ArrayListUnmanaged(?*anyopaque) = .empty;
         defer cf_strings.deinit(allocator);
@@ -519,14 +539,27 @@ const FSEventsBackend = struct {
         ) orelse return error.ArmFailed;
         defer cf.CFRelease(paths_array);
 
+        // Snapshot watched root paths so the callback can filter them out.
+        const roots = try allocator.alloc([]const u8, self.watches.count());
+        errdefer allocator.free(roots);
+        var ri: usize = 0;
+        errdefer for (roots[0..ri]) |r| allocator.free(r);
+        var wit2 = self.watches.iterator();
+        while (wit2.next()) |entry| {
+            roots[ri] = try allocator.dupe(u8, entry.key_ptr.*);
+            ri += 1;
+        }
+
         const ctx = try allocator.create(CallbackContext);
         errdefer allocator.destroy(ctx);
-        ctx.* = .{ .handler = self.handler };
+        ctx.* = .{ .handler = self.handler, .watched_roots = roots };
 
+        // FSEventStreamCreate copies the context struct; stack allocation is fine.
+        const stream_ctx = FSEventStreamContext{ .version = 0, .info = ctx };
         const stream = cf.FSEventStreamCreate(
             null,
             @ptrCast(&callback),
-            ctx,
+            &stream_ctx,
             paths_array,
             kFSEventStreamEventIdSinceNow,
             0.1,
@@ -553,24 +586,33 @@ const FSEventsBackend = struct {
     ) callconv(.c) void {
         const ctx: *CallbackContext = @ptrCast(@alignCast(info orelse return));
         const paths: [*][*:0]const u8 = @ptrCast(@alignCast(event_paths));
-        for (0..num_events) |i| {
+        outer: for (0..num_events) |i| {
             const path = std.mem.sliceTo(paths[i], 0);
             const flags = event_flags[i];
-            const event_type: EventType = if (flags & kFSEventStreamEventFlagItemRemoved != 0)
-                .deleted
-            else if (flags & kFSEventStreamEventFlagItemCreated != 0)
-                if (flags & kFSEventStreamEventFlagItemIsDir != 0) .dir_created else .created
-            else if (flags & kFSEventStreamEventFlagItemRenamed != 0)
-                .renamed
-            else if (flags & kFSEventStreamEventFlagItemModified != 0)
-                .modified
-            else
-                continue;
-            ctx.handler.change(path, event_type) catch |e| switch (e) {
-                error.HandlerFailed => {
-                    std.log.err("nightwatch.callback failed: {t}", .{e});
-                },
-            };
+
+            // Skip events for the watched root dirs themselves; FSEvents often
+            // delivers spurious historical events for them at stream start.
+            for (ctx.watched_roots) |root| {
+                if (std.mem.eql(u8, path, root)) continue :outer;
+            }
+
+            // FSEvents coalesces operations, so multiple flags may be set on
+            // a single event.  Emit one change call per applicable flag so
+            // callers see all relevant event types (e.g. created + modified).
+            const is_dir = flags & kFSEventStreamEventFlagItemIsDir != 0;
+            if (flags & kFSEventStreamEventFlagItemCreated != 0) {
+                const et: EventType = if (is_dir) .dir_created else .created;
+                ctx.handler.change(path, et) catch {};
+            }
+            if (flags & kFSEventStreamEventFlagItemRemoved != 0) {
+                ctx.handler.change(path, .deleted) catch {};
+            }
+            if (flags & kFSEventStreamEventFlagItemRenamed != 0) {
+                ctx.handler.change(path, .renamed) catch {};
+            }
+            if (flags & kFSEventStreamEventFlagItemModified != 0) {
+                ctx.handler.change(path, .modified) catch {};
+            }
         }
     }
 
@@ -579,12 +621,14 @@ const FSEventsBackend = struct {
         const owned = try allocator.dupe(u8, path);
         errdefer allocator.free(owned);
         try self.watches.put(allocator, owned, {});
-        // Watches added after arm() take effect on the next restart.
-        // In practice all watches are added before arm() is called.
+        self.stop_stream(allocator);
+        self.arm(allocator) catch {};
     }
 
     fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
         if (self.watches.fetchSwapRemove(path)) |entry| allocator.free(entry.key);
+        self.stop_stream(allocator);
+        self.arm(allocator) catch {};
     }
 };
 
