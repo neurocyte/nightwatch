@@ -1,14 +1,15 @@
 ```
-     _   _ _       _     _     _       _     _       _         
-    | \ | (_)     | |   | |   | \     / |   | |     | |        
-    |  \| |_  __ _| |__ | |_  \  \ _ /  /_ _| |_  __| |___     
-    | . ` | |/ _` | '_ \| __|  \  ` '  / _` | __|/ _| '_  \    
-    | |\  | | (_| | | | | |_    \     / (_| | |_| (_| | | |    
-    |_| \_|_|\__, |_| |_|\__|    \_|_/ \__,_|\__|\__|_| |_|    
-              __/ |                                            
-             |___/                                             
-                   T H E   N I G H T   W A T C H               
+     _   _ _       _     _     _       _     _       _
+    | \ | (_)     | |   | |   | \     / |   | |     | |
+    |  \| |_  __ _| |__ | |_  \  \ _ /  /_ _| |_  __| |___
+    | . ` | |/ _` | '_ \| __|  \  ` '  / _` | __|/ _| '_  \
+    | |\  | | (_| | | | | |_    \     / (_| | |_| (_| | | |
+    |_| \_|_|\__, |_| |_|\__|    \_|_/ \__,_|\__|\__|_| |_|
+              __/ |
+             |___/
+                   T H E   N I G H T   W A T C H
 ```
+
 ![nightwatch](docs/nightwatch.png)
 
 > The city sleeps.
@@ -29,7 +30,7 @@ It does not interfere.
 It does not speculate.
 It simply keeps watch.
 
-------------------------------------------------------------------------
+---
 
 ## Features
 
@@ -51,7 +52,7 @@ The Watch is written in **Zig** and built using the Zig build system.
 
 ## Build CLI
 
-``` bash
+```bash
 zig build
 ```
 
@@ -61,11 +62,11 @@ The executable will be located in:
 
 ## Install System-Wide
 
-``` bash
+```bash
 zig build install
 ```
 
-------------------------------------------------------------------------
+---
 
 # Using as a Zig Module
 
@@ -74,7 +75,7 @@ other Zig programs.
 
 In your `build.zig`:
 
-``` zig
+```zig
 const nightwatch = b.dependency("nightwatch", .{
     .target = target,
     .optimize = optimize,
@@ -85,29 +86,29 @@ exe.root_module.addImport("nightwatch", nightwatch.module("nightwatch"));
 
 In your Zig source:
 
-``` zig
+```zig
 const nightwatch = @import("nightwatch");
 ```
 
 You now have programmatic access to the tracking engine.
 
-------------------------------------------------------------------------
+---
 
 # CLI Usage
 
-``` bash
+```bash
 nightwatch [{path}..]
 ```
 
 Run:
 
-``` bash
+```bash
 nightwatch --help
 ```
 
 for full command documentation.
 
-------------------------------------------------------------------------
+---
 
 # Philosophy
 
