@@ -6,12 +6,17 @@ pub const EventType = enum {
     created,
     modified,
     deleted,
-    /// A new directory was created inside a watched directory.
-    /// The library automatically begins watching it; no action is required.
-    dir_created,
     /// Only produced on macOS and Windows where the OS gives no pairing info.
-    /// On Linux, paired renames are emitted as a { "FW", "rename", from, to } message instead.
+    /// On Linux, paired renames are emitted as a rename event with both paths instead.
     renamed,
+};
+
+pub const ObjectType = enum {
+    file,
+    dir,
+    /// The object type could not be determined (e.g. a deleted file on Windows
+    /// where the path no longer exists to query).
+    unknown,
 };
 
 pub const Error = error{
@@ -29,18 +34,18 @@ pub const Handler = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        change: *const fn (handler: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void,
-        rename: *const fn (handler: *Handler, src_path: []const u8, dst_path: []const u8) error{HandlerFailed}!void,
+        change: *const fn (handler: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void,
+        rename: *const fn (handler: *Handler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void,
         /// Only present in Linux poll mode (linux_poll_mode == true).
         wait_readable: if (linux_poll_mode) *const fn (handler: *Handler) error{HandlerFailed}!ReadableStatus else void,
     };
 
-    fn change(handler: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void {
-        return handler.vtable.change(handler, path, event_type);
+    fn change(handler: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
+        return handler.vtable.change(handler, path, event_type, object_type);
     }
 
-    fn rename(handler: *Handler, src_path: []const u8, dst_path: []const u8) error{HandlerFailed}!void {
-        return handler.vtable.rename(handler, src_path, dst_path);
+    fn rename(handler: *Handler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
+        return handler.vtable.rename(handler, src_path, dst_path, object_type);
     }
 
     fn wait_readable(handler: *Handler) error{HandlerFailed}!ReadableStatus {
@@ -138,18 +143,18 @@ const Interceptor = struct {
         .wait_readable = if (linux_poll_mode) wait_readable_cb else {},
     };
 
-    fn change_cb(h: *Handler, path: []const u8, event_type: EventType) error{HandlerFailed}!void {
+    fn change_cb(h: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
         const self: *Interceptor = @fieldParentPtr("handler", h);
-        if (event_type == .dir_created and !Backend.watches_recursively) {
+        if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
             self.backend.add_watch(self.allocator, path) catch {};
             recurse_watch(&self.backend, self.allocator, path);
         }
-        return self.user_handler.change(path, event_type);
+        return self.user_handler.change(path, event_type, object_type);
     }
 
-    fn rename_cb(h: *Handler, src: []const u8, dst: []const u8) error{HandlerFailed}!void {
+    fn rename_cb(h: *Handler, src: []const u8, dst: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
         const self: *Interceptor = @fieldParentPtr("handler", h);
-        return self.user_handler.rename(src, dst);
+        return self.user_handler.rename(src, dst, object_type);
     }
 
     fn wait_readable_cb(h: *Handler) error{HandlerFailed}!ReadableStatus {
@@ -311,6 +316,7 @@ const INotifyBackend = struct {
         const PendingRename = struct {
             cookie: u32,
             path: []u8, // owned by drain's allocator
+            object_type: ObjectType,
         };
 
         var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
@@ -318,7 +324,7 @@ const INotifyBackend = struct {
         defer {
             // Any unpaired MOVED_FROM means the file was moved out of the watched tree.
             for (pending_renames.items) |r| {
-                self.handler.change(r.path, EventType.deleted) catch {};
+                self.handler.change(r.path, EventType.deleted, r.object_type) catch {};
                 allocator.free(r.path);
             }
             pending_renames.deinit(allocator);
@@ -355,6 +361,7 @@ const INotifyBackend = struct {
                     try pending_renames.append(allocator, .{
                         .cookie = ev.cookie,
                         .path = try allocator.dupe(u8, full_path),
+                        .object_type = if (ev.mask & IN.ISDIR != 0) .dir else .file,
                     });
                 } else if (ev.mask & IN.MOVED_TO != 0) {
                     // Look for a paired MOVED_FROM.
@@ -369,29 +376,32 @@ const INotifyBackend = struct {
                         // Complete rename pair: emit a single atomic rename message.
                         const r = pending_renames.swapRemove(i);
                         defer allocator.free(r.path);
-                        try self.handler.rename(r.path, full_path);
+                        try self.handler.rename(r.path, full_path, r.object_type);
                     } else {
                         // No paired MOVED_FROM, file was moved in from outside the watched tree.
-                        try self.handler.change(full_path, EventType.created);
+                        const ot: ObjectType = if (ev.mask & IN.ISDIR != 0) .dir else .file;
+                        try self.handler.change(full_path, EventType.created, ot);
                     }
                 } else if (ev.mask & IN.MOVE_SELF != 0) {
                     // The watched directory itself was renamed/moved away.
-                    try self.handler.change(full_path, EventType.deleted);
+                    try self.handler.change(full_path, EventType.deleted, .dir);
                 } else {
+                    const is_dir = ev.mask & IN.ISDIR != 0;
+                    const object_type: ObjectType = if (is_dir) .dir else .file;
                     const event_type: EventType = if (ev.mask & IN.CREATE != 0)
-                        if (ev.mask & IN.ISDIR != 0) .dir_created else .created
+                        .created
                     else if (ev.mask & (IN.DELETE | IN.DELETE_SELF) != 0) blk: {
                         // Suppress IN_DELETE|IN_ISDIR for subdirs that have their
                         // own watch: IN_DELETE_SELF on that watch will fire the
                         // same path without duplication.
-                        if (ev.mask & IN.ISDIR != 0 and self.has_watch_for_path(full_path))
+                        if (is_dir and self.has_watch_for_path(full_path))
                             continue;
                         break :blk .deleted;
                     } else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
                         .modified
                     else
                         continue;
-                    try self.handler.change(full_path, event_type);
+                    try self.handler.change(full_path, event_type, object_type);
                 }
             }
         }
@@ -599,19 +609,18 @@ const FSEventsBackend = struct {
             // FSEvents coalesces operations, so multiple flags may be set on
             // a single event.  Emit one change call per applicable flag so
             // callers see all relevant event types (e.g. created + modified).
-            const is_dir = flags & kFSEventStreamEventFlagItemIsDir != 0;
+            const ot: ObjectType = if (flags & kFSEventStreamEventFlagItemIsDir != 0) .dir else .file;
             if (flags & kFSEventStreamEventFlagItemCreated != 0) {
-                const et: EventType = if (is_dir) .dir_created else .created;
-                ctx.handler.change(path, et) catch {};
+                ctx.handler.change(path, .created, ot) catch {};
             }
             if (flags & kFSEventStreamEventFlagItemRemoved != 0) {
-                ctx.handler.change(path, .deleted) catch {};
+                ctx.handler.change(path, .deleted, ot) catch {};
             }
             if (flags & kFSEventStreamEventFlagItemRenamed != 0) {
-                ctx.handler.change(path, .renamed) catch {};
+                ctx.handler.change(path, .renamed, ot) catch {};
             }
             if (flags & kFSEventStreamEventFlagItemModified != 0) {
-                ctx.handler.change(path, .modified) catch {};
+                ctx.handler.change(path, .modified, ot) catch {};
             }
         }
     }
@@ -755,7 +764,7 @@ const KQueueBackend = struct {
                 self.file_watches_mutex.unlock();
                 if (file_path) |fp| {
                     if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0)
-                        self.handler.change(fp, EventType.modified) catch return;
+                        self.handler.change(fp, EventType.modified, .file) catch return;
                     continue;
                 }
 
@@ -768,9 +777,9 @@ const KQueueBackend = struct {
                 self.watches_mutex.unlock();
                 if (dir_path == null) continue;
                 if (ev.fflags & NOTE_DELETE != 0) {
-                    self.handler.change(dir_path.?, EventType.deleted) catch return;
+                    self.handler.change(dir_path.?, EventType.deleted, .dir) catch return;
                 } else if (ev.fflags & NOTE_RENAME != 0) {
-                    self.handler.change(dir_path.?, EventType.renamed) catch return;
+                    self.handler.change(dir_path.?, EventType.renamed, .dir) catch return;
                 } else if (ev.fflags & NOTE_WRITE != 0) {
                     self.scan_dir(allocator, dir_path.?) catch {};
                 }
@@ -867,10 +876,10 @@ const KQueueBackend = struct {
         self.snapshots_mutex.unlock();
 
         // Emit all events outside the lock so handlers may safely call watch()/unwatch().
-        // Emit dir_created, then deletions, then creations. Deletions first ensures that
+        // Emit created dirs, then deletions, then creations. Deletions first ensures that
         // a rename (old disappears, new appears) reports the source path before the dest.
         for (new_dirs.items) |full_path|
-            try self.handler.change(full_path, EventType.dir_created);
+            try self.handler.change(full_path, EventType.created, .dir);
         for (to_delete.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch {
@@ -878,14 +887,14 @@ const KQueueBackend = struct {
                 continue;
             };
             self.deregister_file_watch(allocator, full_path);
-            try self.handler.change(full_path, EventType.deleted);
+            try self.handler.change(full_path, EventType.deleted, .file);
             allocator.free(name);
         }
         for (to_create.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
             self.register_file_watch(allocator, full_path);
-            try self.handler.change(full_path, EventType.created);
+            try self.handler.change(full_path, EventType.created, .file);
         }
     }
 
@@ -1113,6 +1122,7 @@ const WindowsBackend = struct {
     thread: ?std.Thread,
     watches: std.StringHashMapUnmanaged(Watch),
     watches_mutex: std.Thread.Mutex,
+    path_types: std.StringHashMapUnmanaged(ObjectType),
 
     // A completion key of zero is used to signal the background thread to exit.
     const SHUTDOWN_KEY: windows.ULONG_PTR = 0;
@@ -1149,7 +1159,7 @@ const WindowsBackend = struct {
 
     fn init(handler: *Handler) windows.CreateIoCompletionPortError!@This() {
         const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
-        return .{ .handler = handler, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = .{} };
+        return .{ .handler = handler, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = .{}, .path_types = .empty };
     }
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -1163,19 +1173,23 @@ const WindowsBackend = struct {
             allocator.free(entry.value_ptr.*.buf);
         }
         self.watches.deinit(allocator);
+        var pt_it = self.path_types.iterator();
+        while (pt_it.next()) |entry| std.heap.page_allocator.free(entry.key_ptr.*);
+        self.path_types.deinit(std.heap.page_allocator);
         _ = win32.CloseHandle(self.iocp);
     }
 
     fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} || std.Thread.SpawnError)!void {
         _ = allocator;
         if (self.thread != null) return error.AlreadyArmed;
-        self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self.iocp, &self.watches, &self.watches_mutex, self.handler });
+        self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
     }
 
     fn thread_fn(
         iocp: windows.HANDLE,
         watches: *std.StringHashMapUnmanaged(Watch),
         watches_mutex: *std.Thread.Mutex,
+        path_types: *std.StringHashMapUnmanaged(ObjectType),
         handler: *Handler,
     ) void {
         var bytes: windows.DWORD = 0;
@@ -1215,29 +1229,32 @@ const WindowsBackend = struct {
                             offset += info.NextEntryOffset;
                             continue;
                         };
-                        // Distinguish files from directories.
-                        const is_dir = blk: {
+                        // Determine object_type: try GetFileAttributesW; cache result.
+                        const object_type: ObjectType = if (event_type == .deleted) blk: {
+                            // Path no longer exists; use cached type if available.
+                            const cached = path_types.fetchRemove(full_path);
+                            break :blk if (cached) |kv| kv.value else .unknown;
+                        } else blk: {
                             var full_path_w: [std.fs.max_path_bytes]windows.WCHAR = undefined;
-                            const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk false;
+                            const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk .unknown;
                             full_path_w[len] = 0;
                             const attrs = win32.GetFileAttributesW(full_path_w[0..len :0]);
                             const INVALID: windows.DWORD = 0xFFFFFFFF;
                             const FILE_ATTRIBUTE_DIRECTORY: windows.DWORD = 0x10;
-                            break :blk attrs != INVALID and (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                            const ot: ObjectType = if (attrs == INVALID) .unknown else if (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) .dir else .file;
+                            // Cache the determined type.
+                            if (ot != .unknown) {
+                                const owned_key = std.heap.page_allocator.dupe(u8, full_path) catch break :blk ot;
+                                path_types.put(std.heap.page_allocator, owned_key, ot) catch std.heap.page_allocator.free(owned_key);
+                            }
+                            break :blk ot;
                         };
-                        const adjusted_event_type: EventType = if (is_dir and event_type == .created)
-                            .dir_created
-                        else if (is_dir) { // Other directory events (modified, deleted, renamed), skip.
-                            if (info.NextEntryOffset == 0) break;
-                            offset += info.NextEntryOffset;
-                            continue;
-                        } else event_type;
                         // Capture next_entry_offset before releasing the mutex: after unlock,
                         // the main thread may call remove_watch() which frees w.buf, making
                         // the `info` pointer (which points into w.buf) a dangling reference.
                         const next_entry_offset = info.NextEntryOffset;
                         watches_mutex.unlock();
-                        handler.change(full_path, adjusted_event_type) catch {
+                        handler.change(full_path, event_type, object_type) catch {
                             watches_mutex.lock();
                             break;
                         };

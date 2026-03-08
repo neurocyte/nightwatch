@@ -7,7 +7,7 @@ const nw = @import("nightwatch");
 // ---------------------------------------------------------------------------
 
 const RecordedEvent = union(enum) {
-    change: struct { path: []u8, event_type: nw.EventType },
+    change: struct { path: []u8, event_type: nw.EventType, object_type: nw.ObjectType },
     rename: struct { src: []u8, dst: []u8 },
 
     fn deinit(self: RecordedEvent, allocator: std.mem.Allocator) void {
@@ -52,18 +52,18 @@ const TestHandler = struct {
         .wait_readable = if (nw.linux_poll_mode) wait_readable_cb else {},
     };
 
-    fn change_cb(handler: *nw.Handler, path: []const u8, event_type: nw.EventType) error{HandlerFailed}!void {
+    fn change_cb(handler: *nw.Handler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
         const self: *TestHandler = @fieldParentPtr("handler", handler);
         const owned = self.allocator.dupe(u8, path) catch return error.HandlerFailed;
         self.events.append(self.allocator, .{
-            .change = .{ .path = owned, .event_type = event_type },
+            .change = .{ .path = owned, .event_type = event_type, .object_type = object_type },
         }) catch {
             self.allocator.free(owned);
             return error.HandlerFailed;
         };
     }
 
-    fn rename_cb(handler: *nw.Handler, src: []const u8, dst: []const u8) error{HandlerFailed}!void {
+    fn rename_cb(handler: *nw.Handler, src: []const u8, dst: []const u8, _: nw.ObjectType) error{HandlerFailed}!void {
         const self: *TestHandler = @fieldParentPtr("handler", handler);
         const owned_src = self.allocator.dupe(u8, src) catch return error.HandlerFailed;
         errdefer self.allocator.free(owned_src);
@@ -88,8 +88,8 @@ const TestHandler = struct {
     // Query helpers
     // -----------------------------------------------------------------------
 
-    fn hasChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType) bool {
-        return self.indexOfChange(path, event_type) != null;
+    fn hasChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) bool {
+        return self.indexOfChange(path, event_type, object_type) != null;
     }
 
     fn hasRename(self: *const TestHandler, src: []const u8, dst: []const u8) bool {
@@ -97,10 +97,11 @@ const TestHandler = struct {
     }
 
     /// Returns the list index of the first matching change event, or null.
-    fn indexOfChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType) ?usize {
+    fn indexOfChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) ?usize {
         for (self.events.items, 0..) |e, i| {
             if (e == .change and
                 e.change.event_type == event_type and
+                e.change.object_type == object_type and
                 std.mem.eql(u8, e.change.path, path)) return i;
         }
         return null;
@@ -216,7 +217,7 @@ test "creating a file emits a 'created' event" {
 
     try drainEvents(&watcher);
 
-    try std.testing.expect(th.hasChange(file_path, .created));
+    try std.testing.expect(th.hasChange(file_path, .created, .file));
 }
 
 test "writing to a file emits a 'modified' event" {
@@ -251,7 +252,7 @@ test "writing to a file emits a 'modified' event" {
 
     try drainEvents(&watcher);
 
-    try std.testing.expect(th.hasChange(file_path, .modified));
+    try std.testing.expect(th.hasChange(file_path, .modified, .file));
 }
 
 test "deleting a file emits a 'deleted' event" {
@@ -268,23 +269,25 @@ test "deleting a file emits a 'deleted' event" {
 
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "gone.txt" });
     defer allocator.free(file_path);
-    {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
-    }
 
     var watcher = try Watcher.init(allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
+    // Create the file after the watcher is active so the backend can cache its type.
+    {
+        const f = try std.fs.createFileAbsolute(file_path, .{});
+        f.close();
+    }
+
     try std.fs.deleteFileAbsolute(file_path);
 
     try drainEvents(&watcher);
 
-    try std.testing.expect(th.hasChange(file_path, .deleted));
+    try std.testing.expect(th.hasChange(file_path, .deleted, .file));
 }
 
-test "creating a sub-directory emits a 'dir_created' event" {
+test "creating a sub-directory emits a 'created' event with object_type dir" {
     const allocator = std.testing.allocator;
 
     const tmp = try makeTempDir(allocator);
@@ -306,7 +309,7 @@ test "creating a sub-directory emits a 'dir_created' event" {
 
     try drainEvents(&watcher);
 
-    try std.testing.expect(th.hasChange(dir_path, .dir_created));
+    try std.testing.expect(th.hasChange(dir_path, .created, .dir));
 }
 
 test "renaming a file is reported correctly per-platform" {
@@ -344,8 +347,8 @@ test "renaming a file is reported correctly per-platform" {
         try std.testing.expect(th.hasRename(src_path, dst_path));
     } else {
         // macOS/Windows emit individual .renamed change events per path.
-        const has_old = th.hasChange(src_path, .renamed) or th.hasChange(src_path, .deleted);
-        const has_new = th.hasChange(dst_path, .renamed) or th.hasChange(dst_path, .created);
+        const has_old = th.hasChange(src_path, .renamed, .file) or th.hasChange(src_path, .deleted, .file);
+        const has_new = th.hasChange(dst_path, .renamed, .file) or th.hasChange(dst_path, .created, .file);
         try std.testing.expect(has_old or has_new);
     }
 }
@@ -407,7 +410,7 @@ test "unwatch stops delivering events for that directory" {
         f.close();
     }
     try drainEvents(&watcher);
-    try std.testing.expect(th.hasChange(file1, .created));
+    try std.testing.expect(th.hasChange(file1, .created, .file));
 
     // Stop watching, then create another file - must NOT appear.
     watcher.unwatch(tmp);
@@ -454,7 +457,7 @@ test "multiple files created sequentially all appear in the event list" {
     try drainEvents(&watcher);
 
     for (paths) |p| {
-        try std.testing.expect(th.hasChange(p, .created));
+        try std.testing.expect(th.hasChange(p, .created, .file));
     }
 }
 
@@ -495,8 +498,8 @@ test "rename: old-name event precedes new-name event" {
     // Both paths must have produced some event.
     const src_idx = th.indexOfAnyPath(src_path) orelse
         return error.MissingSrcEvent;
-    const dst_idx = th.indexOfChange(dst_path, .renamed) orelse
-        th.indexOfChange(dst_path, .created) orelse
+    const dst_idx = th.indexOfChange(dst_path, .renamed, .file) orelse
+        th.indexOfChange(dst_path, .created, .file) orelse
         return error.MissingDstEvent;
 
     // The source (old name) event must precede the destination (new name) event.
@@ -552,7 +555,7 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
         th.indexOfAnyPath(src_path) orelse return error.MissingSrcEvent;
 
     // The modify event on the new name must come strictly after the rename.
-    const modify_idx = th.indexOfChange(dst_path, .modified) orelse
+    const modify_idx = th.indexOfChange(dst_path, .modified, .file) orelse
         return error.MissingModifyEvent;
 
     try std.testing.expect(rename_idx < modify_idx);

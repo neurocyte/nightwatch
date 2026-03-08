@@ -24,27 +24,36 @@ const CliHandler = struct {
         .wait_readable = if (nightwatch.linux_poll_mode) wait_readable_cb else {},
     };
 
-    fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType) error{HandlerFailed}!void {
+    fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         var buf: [4096]u8 = undefined;
         var stdout = self.out.writer(&buf);
         defer stdout.interface.flush() catch {};
-        const label = switch (event_type) {
+        const event_label = switch (event_type) {
             .created => "create ",
             .modified => "modify ",
             .deleted => "delete ",
-            .dir_created => "mkdir  ",
             .renamed => "rename ",
         };
-        stdout.interface.print("{s}  {s}\n", .{ label, path }) catch return error.HandlerFailed;
+        const type_label = switch (object_type) {
+            .file => "file",
+            .dir => "dir ",
+            .unknown => "?   ",
+        };
+        stdout.interface.print("{s}  {s}  {s}\n", .{ event_label, type_label, path }) catch return error.HandlerFailed;
     }
 
-    fn rename_cb(h: *nightwatch.Handler, src: []const u8, dst: []const u8) error{HandlerFailed}!void {
+    fn rename_cb(h: *nightwatch.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         var buf: [4096]u8 = undefined;
         var stdout = self.out.writer(&buf);
         defer stdout.interface.flush() catch {};
-        stdout.interface.print("rename   {s}  ->  {s}\n", .{ src, dst }) catch return error.HandlerFailed;
+        const type_label = switch (object_type) {
+            .file => "file",
+            .dir => "dir ",
+            .unknown => "?   ",
+        };
+        stdout.interface.print("rename   {s}  {s}  ->  {s}\n", .{ type_label, src, dst }) catch return error.HandlerFailed;
     }
 
     fn wait_readable_cb(_: *nightwatch.Handler) error{HandlerFailed}!nightwatch.ReadableStatus {
@@ -101,12 +110,13 @@ fn usage(out: std.fs.File) !void {
         \\
         \\The Watch never sleeps.
         \\
-        \\Events printed to stdout:
-        \\  create    a file was created
+        \\Events printed to stdout (columns: event  type  path):
+        \\  create    a file or directory was created
         \\  modify    a file was modified
         \\  delete    a file or directory was deleted
-        \\  mkdir     a directory was created
         \\  rename    a file or directory was renamed
+        \\
+        \\Type column: file, dir, or ? (unknown)
         \\
         \\Stand down with Ctrl-C.
         \\
