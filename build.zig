@@ -12,13 +12,11 @@ pub fn build(b: *std.Build) void {
         ) orelse false;
     } else false;
 
-    const linux_read_thread = if (target.result.os.tag == .linux) blk: {
-        break :blk b.option(
-            bool,
-            "linux_read_thread",
-            "Use a background thread on Linux (like macOS/Windows) instead of requiring the caller to drive the event loop via poll_fd/handle_read_ready",
-        ) orelse false;
-    } else false;
+    const linux_read_thread = b.option(
+        bool,
+        "linux_read_thread",
+        "Use a background thread on Linux (like macOS/Windows) instead of requiring the caller to drive the event loop via poll_fd/handle_read_ready",
+    ) orelse true;
 
     const options = b.addOptions();
     options.addOption(bool, "use_fsevents", use_fsevents);
