@@ -240,6 +240,7 @@ pub fn main() !void {
             continue;
         };
         try stderr.interface.print("on watch: {s}\n", .{path});
+        try stderr.interface.flush();
     }
 
     if (Watcher.interface_type == .polling) {
