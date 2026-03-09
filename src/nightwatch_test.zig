@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const nw = @import("nightwatch");
 
 // ---------------------------------------------------------------------------
-// TestHandler - records every callback so tests can assert on them.
+// RecordedEvent
 // ---------------------------------------------------------------------------
 
 const RecordedEvent = union(enum) {
@@ -21,120 +21,114 @@ const RecordedEvent = union(enum) {
     }
 };
 
-const TestHandler = struct {
-    handler: Watcher.Handler,
-    allocator: std.mem.Allocator,
-    events: std.ArrayListUnmanaged(RecordedEvent),
+// ---------------------------------------------------------------------------
+// MakeTestHandler — adapts to the Handler type required by the given Watcher.
+// ---------------------------------------------------------------------------
 
-    fn init(allocator: std.mem.Allocator) !*TestHandler {
-        const self = try allocator.create(TestHandler);
-        self.* = .{
-            .handler = .{ .vtable = &vtable },
-            .allocator = allocator,
-            .events = .empty,
-        };
-        return self;
-    }
+fn MakeTestHandler(comptime Watcher: type) type {
+    const H = Watcher.Handler;
+    return struct {
+        handler: H,
+        allocator: std.mem.Allocator,
+        events: std.ArrayListUnmanaged(RecordedEvent),
 
-    fn deinit(self: *TestHandler) void {
-        for (self.events.items) |e| e.deinit(self.allocator);
-        self.events.deinit(self.allocator);
-        self.allocator.destroy(self);
-    }
-
-    // -----------------------------------------------------------------------
-    // vtable
-    // -----------------------------------------------------------------------
-
-    const vtable = Watcher.Handler.VTable{
-        .change = change_cb,
-        .rename = rename_cb,
-    };
-
-    fn change_cb(handler: *Watcher.Handler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
-        const self: *TestHandler = @fieldParentPtr("handler", handler);
-        const owned = self.allocator.dupe(u8, path) catch return error.HandlerFailed;
-        self.events.append(self.allocator, .{
-            .change = .{ .path = owned, .event_type = event_type, .object_type = object_type },
-        }) catch {
-            self.allocator.free(owned);
-            return error.HandlerFailed;
-        };
-    }
-
-    fn rename_cb(handler: *Watcher.Handler, src: []const u8, dst: []const u8, _: nw.ObjectType) error{HandlerFailed}!void {
-        const self: *TestHandler = @fieldParentPtr("handler", handler);
-        const owned_src = self.allocator.dupe(u8, src) catch return error.HandlerFailed;
-        errdefer self.allocator.free(owned_src);
-        const owned_dst = self.allocator.dupe(u8, dst) catch return error.HandlerFailed;
-        self.events.append(self.allocator, .{
-            .rename = .{ .src = owned_src, .dst = owned_dst },
-        }) catch {
-            self.allocator.free(owned_dst);
-            return error.HandlerFailed;
-        };
-    }
-
-    // On Linux the inotify backend calls wait_readable() inside arm() and
-    // after each read-drain.  We return `will_notify` so it parks; the test
-    // then calls handle_read_ready() explicitly to drive event delivery.
-    fn wait_readable_cb(handler: *Watcher.Handler) error{HandlerFailed}!nw.ReadableStatus {
-        _ = handler;
-        return .will_notify;
-    }
-
-    // -----------------------------------------------------------------------
-    // Query helpers
-    // -----------------------------------------------------------------------
-
-    fn hasChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) bool {
-        return self.indexOfChange(path, event_type, object_type) != null;
-    }
-
-    fn hasRename(self: *const TestHandler, src: []const u8, dst: []const u8) bool {
-        return self.indexOfRename(src, dst) != null;
-    }
-
-    /// Returns the list index of the first matching change event, or null.
-    fn indexOfChange(self: *const TestHandler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) ?usize {
-        for (self.events.items, 0..) |e, i| {
-            if (e == .change and
-                e.change.event_type == event_type and
-                e.change.object_type == object_type and
-                std.mem.eql(u8, e.change.path, path)) return i;
-        }
-        return null;
-    }
-
-    /// Returns the list index of the first matching rename event, or null.
-    fn indexOfRename(self: *const TestHandler, src: []const u8, dst: []const u8) ?usize {
-        for (self.events.items, 0..) |e, i| {
-            if (e == .rename and
-                std.mem.eql(u8, e.rename.src, src) and
-                std.mem.eql(u8, e.rename.dst, dst)) return i;
-        }
-        return null;
-    }
-
-    /// Returns the list index of the first event (any type) whose path equals
-    /// `path`, or null.  Used for cross-platform ordering checks where we care
-    /// about position but not the exact event variant.
-    fn indexOfAnyPath(self: *const TestHandler, path: []const u8) ?usize {
-        for (self.events.items, 0..) |e, i| {
-            const p = switch (e) {
-                .change => |c| c.path,
-                .rename => |r| r.src, // treat src as the "from" path
+        fn init(allocator: std.mem.Allocator) !*@This() {
+            const self = try allocator.create(@This());
+            self.* = .{
+                .handler = .{ .vtable = &vtable },
+                .allocator = allocator,
+                .events = .empty,
             };
-            if (std.mem.eql(u8, p, path)) return i;
+            return self;
         }
-        return null;
-    }
-};
 
-// ---------------------------------------------------------------------------
-// Watcher type alias - nightwatch.zig is itself a struct type.
-// ---------------------------------------------------------------------------
-const Watcher = nw.Default;
+        fn deinit(self: *@This()) void {
+            for (self.events.items) |e| e.deinit(self.allocator);
+            self.events.deinit(self.allocator);
+            self.allocator.destroy(self);
+        }
+
+        // For the polling interface the vtable requires a wait_readable entry.
+        // The inner anonymous struct keeps the ReadableStatus reference inside the
+        // comptime-if so it is never analyzed for threaded variants where H (= Handler)
+        // has no ReadableStatus member.
+        const vtable: H.VTable = if (Watcher.interface_type == .polling) .{
+            .change = change_cb,
+            .rename = rename_cb,
+            .wait_readable = struct {
+                fn f(h: *H) error{HandlerFailed}!H.ReadableStatus {
+                    _ = h;
+                    return .will_notify;
+                }
+            }.f,
+        } else .{
+            .change = change_cb,
+            .rename = rename_cb,
+        };
+
+        fn change_cb(h: *H, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
+            const self: *@This() = @fieldParentPtr("handler", h);
+            const owned = self.allocator.dupe(u8, path) catch return error.HandlerFailed;
+            self.events.append(self.allocator, .{
+                .change = .{ .path = owned, .event_type = event_type, .object_type = object_type },
+            }) catch {
+                self.allocator.free(owned);
+                return error.HandlerFailed;
+            };
+        }
+
+        fn rename_cb(h: *H, src: []const u8, dst: []const u8, _: nw.ObjectType) error{HandlerFailed}!void {
+            const self: *@This() = @fieldParentPtr("handler", h);
+            const owned_src = self.allocator.dupe(u8, src) catch return error.HandlerFailed;
+            errdefer self.allocator.free(owned_src);
+            const owned_dst = self.allocator.dupe(u8, dst) catch return error.HandlerFailed;
+            self.events.append(self.allocator, .{
+                .rename = .{ .src = owned_src, .dst = owned_dst },
+            }) catch {
+                self.allocator.free(owned_dst);
+                return error.HandlerFailed;
+            };
+        }
+
+        fn hasChange(self: *const @This(), path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) bool {
+            return self.indexOfChange(path, event_type, object_type) != null;
+        }
+
+        fn hasRename(self: *const @This(), src: []const u8, dst: []const u8) bool {
+            return self.indexOfRename(src, dst) != null;
+        }
+
+        fn indexOfChange(self: *const @This(), path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) ?usize {
+            for (self.events.items, 0..) |e, i| {
+                if (e == .change and
+                    e.change.event_type == event_type and
+                    e.change.object_type == object_type and
+                    std.mem.eql(u8, e.change.path, path)) return i;
+            }
+            return null;
+        }
+
+        fn indexOfRename(self: *const @This(), src: []const u8, dst: []const u8) ?usize {
+            for (self.events.items, 0..) |e, i| {
+                if (e == .rename and
+                    std.mem.eql(u8, e.rename.src, src) and
+                    std.mem.eql(u8, e.rename.dst, dst)) return i;
+            }
+            return null;
+        }
+
+        fn indexOfAnyPath(self: *const @This(), path: []const u8) ?usize {
+            for (self.events.items, 0..) |e, i| {
+                const p = switch (e) {
+                    .change => |c| c.path,
+                    .rename => |r| r.src,
+                };
+                if (std.mem.eql(u8, p, path)) return i;
+            }
+            return null;
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Test utilities
@@ -142,7 +136,6 @@ const Watcher = nw.Default;
 
 var temp_dir_counter = std.atomic.Value(u32).init(0);
 
-/// Create a fresh temporary directory and return its absolute path (caller frees).
 fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
     const n = temp_dir_counter.fetchAdd(1, .monotonic);
     const pid = switch (builtin.os.tag) {
@@ -176,22 +169,21 @@ fn removeTempDir(path: []const u8) void {
     std.fs.deleteTreeAbsolute(path) catch {};
 }
 
-/// Drive event delivery:
-///  - polling watchers: call handle_read_ready() so events are processed.
-///  - threaded watchers: the backend uses its own thread/callback; sleep briefly.
-fn drainEvents(watcher: *Watcher) !void {
-    switch (Watcher.interface_type) {
-        .polling => try watcher.handle_read_ready(),
-        .threaded => std.Thread.sleep(300 * std.time.ns_per_ms),
+/// Drive event delivery for any Watcher variant.
+fn drainEvents(comptime Watcher: type, watcher: *Watcher) !void {
+    if (comptime Watcher.interface_type == .polling) {
+        try watcher.handle_read_ready();
+    } else {
+        std.Thread.sleep(300 * std.time.ns_per_ms);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Individual test case functions, each parametrized on the Watcher type.
 // ---------------------------------------------------------------------------
 
-test "creating a file emits a 'created' event" {
-    const allocator = std.testing.allocator;
+fn testCreateFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -199,7 +191,7 @@ test "creating a file emits a 'created' event" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     var watcher = try Watcher.init(allocator, &th.handler);
@@ -213,17 +205,14 @@ test "creating a file emits a 'created' event" {
         f.close();
     }
 
-    try drainEvents(&watcher);
-
+    try drainEvents(Watcher, &watcher);
     try std.testing.expect(th.hasChange(file_path, .created, .file));
 }
 
-test "writing to a file emits a 'modified' event" {
-    // kqueue watches directories only; file writes don't trigger a directory event,
-    // so modifications are not reliably detectable in real time on this backend.
+fn testModifyFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -231,10 +220,9 @@ test "writing to a file emits a 'modified' event" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
-    // Create the file before setting up the watcher to start from a clean slate.
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "data.txt" });
     defer allocator.free(file_path);
     {
@@ -252,13 +240,12 @@ test "writing to a file emits a 'modified' event" {
         try f.writeAll("hello nightwatch\n");
     }
 
-    try drainEvents(&watcher);
-
+    try drainEvents(Watcher, &watcher);
     try std.testing.expect(th.hasChange(file_path, .modified, .file));
 }
 
-test "deleting a file emits a 'deleted' event" {
-    const allocator = std.testing.allocator;
+fn testDeleteFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -266,7 +253,7 @@ test "deleting a file emits a 'deleted' event" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "gone.txt" });
@@ -276,23 +263,20 @@ test "deleting a file emits a 'deleted' event" {
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    // Create the file after the watcher is active so the backend can cache its type,
-    // then drain before deleting so the file lands in any snapshot before it disappears.
     {
         const f = try std.fs.createFileAbsolute(file_path, .{});
         f.close();
     }
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
     try std.fs.deleteFileAbsolute(file_path);
-
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
     try std.testing.expect(th.hasChange(file_path, .deleted, .file));
 }
 
-test "creating a sub-directory emits a 'created' event with object_type dir" {
-    const allocator = std.testing.allocator;
+fn testCreateSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -300,7 +284,7 @@ test "creating a sub-directory emits a 'created' event with object_type dir" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     var watcher = try Watcher.init(allocator, &th.handler);
@@ -311,13 +295,12 @@ test "creating a sub-directory emits a 'created' event with object_type dir" {
     defer allocator.free(dir_path);
     try std.fs.makeDirAbsolute(dir_path);
 
-    try drainEvents(&watcher);
-
+    try drainEvents(Watcher, &watcher);
     try std.testing.expect(th.hasChange(dir_path, .created, .dir));
 }
 
-test "renaming a file is reported correctly per-platform" {
-    const allocator = std.testing.allocator;
+fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -325,7 +308,7 @@ test "renaming a file is reported correctly per-platform" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     const src_path = try std.fs.path.join(allocator, &.{ tmp, "before.txt" });
@@ -343,22 +326,19 @@ test "renaming a file is reported correctly per-platform" {
     try watcher.watch(tmp);
 
     try std.fs.renameAbsolute(src_path, dst_path);
-
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
     if (builtin.os.tag == .linux) {
-        // inotify pairs MOVED_FROM + MOVED_TO by cookie → single rename event.
         try std.testing.expect(th.hasRename(src_path, dst_path));
     } else {
-        // macOS/Windows emit individual .renamed change events per path.
         const has_old = th.hasChange(src_path, .renamed, .file) or th.hasChange(src_path, .deleted, .file);
         const has_new = th.hasChange(dst_path, .renamed, .file) or th.hasChange(dst_path, .created, .file);
         try std.testing.expect(has_old or has_new);
     }
 }
 
-test "an unwatched directory produces no events" {
-    const allocator = std.testing.allocator;
+fn testUnwatchedDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const watched = try makeTempDir(allocator);
     defer {
@@ -371,12 +351,12 @@ test "an unwatched directory produces no events" {
         allocator.free(unwatched);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     var watcher = try Watcher.init(allocator, &th.handler);
     defer watcher.deinit();
-    try watcher.watch(watched); // only watch the first dir
+    try watcher.watch(watched);
 
     const file_path = try std.fs.path.join(allocator, &.{ unwatched, "silent.txt" });
     defer allocator.free(file_path);
@@ -385,13 +365,12 @@ test "an unwatched directory produces no events" {
         f.close();
     }
 
-    try drainEvents(&watcher);
-
+    try drainEvents(Watcher, &watcher);
     try std.testing.expectEqual(@as(usize, 0), th.events.items.len);
 }
 
-test "unwatch stops delivering events for that directory" {
-    const allocator = std.testing.allocator;
+fn testUnwatch(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -399,24 +378,22 @@ test "unwatch stops delivering events for that directory" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     var watcher = try Watcher.init(allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    // Create a file while watching - should be reported.
     const file1 = try std.fs.path.join(allocator, &.{ tmp, "watched.txt" });
     defer allocator.free(file1);
     {
         const f = try std.fs.createFileAbsolute(file1, .{});
         f.close();
     }
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
     try std.testing.expect(th.hasChange(file1, .created, .file));
 
-    // Stop watching, then create another file - must NOT appear.
     watcher.unwatch(tmp);
     const count_before = th.events.items.len;
 
@@ -426,13 +403,13 @@ test "unwatch stops delivering events for that directory" {
         const f = try std.fs.createFileAbsolute(file2, .{});
         f.close();
     }
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
     try std.testing.expectEqual(count_before, th.events.items.len);
 }
 
-test "multiple files created sequentially all appear in the event list" {
-    const allocator = std.testing.allocator;
+fn testMultipleFiles(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -440,7 +417,7 @@ test "multiple files created sequentially all appear in the event list" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     var watcher = try Watcher.init(allocator, &th.handler);
@@ -458,20 +435,18 @@ test "multiple files created sequentially all appear in the event list" {
     }
     defer for (paths) |p| allocator.free(p);
 
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
     for (paths) |p| {
         try std.testing.expect(th.hasChange(p, .created, .file));
     }
 }
 
-test "rename: old-name event precedes new-name event" {
-    // On Linux inotify produces a single paired rename event, so there is
-    // nothing to order.  On macOS/Windows two separate change events are
-    // emitted; we assert the old-name (source) event arrives first.
+fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    // inotify pairs MOVED_FROM + MOVED_TO into a single rename event; nothing to order.
     if (builtin.os.tag == .linux) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -479,7 +454,7 @@ test "rename: old-name event precedes new-name event" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     const src_path = try std.fs.path.join(allocator, &.{ tmp, "old.txt" });
@@ -497,26 +472,21 @@ test "rename: old-name event precedes new-name event" {
     try watcher.watch(tmp);
 
     try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
-    // Both paths must have produced some event.
     const src_idx = th.indexOfAnyPath(src_path) orelse
         return error.MissingSrcEvent;
     const dst_idx = th.indexOfChange(dst_path, .renamed, .file) orelse
         th.indexOfChange(dst_path, .created, .file) orelse
         return error.MissingDstEvent;
 
-    // The source (old name) event must precede the destination (new name) event.
     try std.testing.expect(src_idx < dst_idx);
 }
 
-test "rename-then-modify: rename event precedes the subsequent modify event" {
-    // After renaming a file, a write to the new name should produce events in
-    // the order [rename/old-name, rename/new-name, modify] so that a consumer
-    // always knows the current identity of the file before seeing changes to it.
+fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
+    const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
     defer {
@@ -524,7 +494,7 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
         allocator.free(tmp);
     }
 
-    const th = try TestHandler.init(allocator);
+    const th = try TH.init(allocator);
     defer th.deinit();
 
     const src_path = try std.fs.path.join(allocator, &.{ tmp, "original.txt" });
@@ -541,28 +511,87 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    // Step 1: rename.
     try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
-    // Step 2: modify the file under its new name.
     {
         const f = try std.fs.openFileAbsolute(dst_path, .{ .mode = .write_only });
         defer f.close();
         try f.writeAll("post-rename content\n");
     }
-    try drainEvents(&watcher);
+    try drainEvents(Watcher, &watcher);
 
-    // Locate the rename boundary: on Linux a single rename event carries both
-    // paths; on other platforms we look for the first event touching src_path.
     const rename_idx: usize = if (builtin.os.tag == .linux)
         th.indexOfRename(src_path, dst_path) orelse return error.MissingRenameEvent
     else
         th.indexOfAnyPath(src_path) orelse return error.MissingSrcEvent;
 
-    // The modify event on the new name must come strictly after the rename.
     const modify_idx = th.indexOfChange(dst_path, .modified, .file) orelse
         return error.MissingModifyEvent;
 
     try std.testing.expect(rename_idx < modify_idx);
+}
+
+// ---------------------------------------------------------------------------
+// Test blocks — each runs its case across all available variants.
+// ---------------------------------------------------------------------------
+
+test "creating a file emits a 'created' event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testCreateFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "writing to a file emits a 'modified' event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testModifyFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "deleting a file emits a 'deleted' event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testDeleteFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "creating a sub-directory emits a 'created' event with object_type dir" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testCreateSubdir(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "renaming a file is reported correctly per-platform" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testRenameFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "an unwatched directory produces no events" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testUnwatchedDir(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "unwatch stops delivering events for that directory" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testUnwatch(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "multiple files created sequentially all appear in the event list" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testMultipleFiles(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "rename: old-name event precedes new-name event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testRenameOrder(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "rename-then-modify: rename event precedes the subsequent modify event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testRenameThenModify(nw.Create(variant), std.testing.allocator);
+    }
 }
