@@ -3,8 +3,9 @@ const builtin = @import("builtin");
 const nightwatch = @import("nightwatch");
 
 const is_posix = switch (builtin.os.tag) {
-    .linux, .macos, .freebsd => true,
-    else => false,
+    .linux, .macos, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+    .windows => false,
+    else => @compileError("unsupported OS"),
 };
 
 // Self-pipe: signal handler writes a byte so poll() / read() unblocks cleanly.
@@ -22,7 +23,6 @@ const CliHandler = struct {
     const vtable = nightwatch.Handler.VTable{
         .change = change_cb,
         .rename = rename_cb,
-        .wait_readable = if (nightwatch.linux_poll_mode) wait_readable_cb else {},
     };
 
     fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
@@ -215,7 +215,7 @@ pub fn main() !void {
         .ignore = ignore_list.items,
     };
 
-    var watcher = try nightwatch.init(allocator, &cli_handler.handler);
+    var watcher = try nightwatch.Default.init(allocator, &cli_handler.handler);
     defer watcher.deinit();
 
     for (watch_paths.items) |path| {

@@ -49,7 +49,6 @@ const TestHandler = struct {
     const vtable = nw.Handler.VTable{
         .change = change_cb,
         .rename = rename_cb,
-        .wait_readable = if (nw.linux_poll_mode) wait_readable_cb else {},
     };
 
     fn change_cb(handler: *nw.Handler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
@@ -135,7 +134,7 @@ const TestHandler = struct {
 // ---------------------------------------------------------------------------
 // Watcher type alias - nightwatch.zig is itself a struct type.
 // ---------------------------------------------------------------------------
-const Watcher = nw;
+const Watcher = nw.Default;
 
 // ---------------------------------------------------------------------------
 // Test utilities
@@ -178,13 +177,12 @@ fn removeTempDir(path: []const u8) void {
 }
 
 /// Drive event delivery:
-///  - Linux:   call handle_read_ready() so inotify events are processed.
-///  - Others:  the backend uses its own thread/callback; sleep briefly.
+///  - polling watchers: call handle_read_ready() so events are processed.
+///  - threaded watchers: the backend uses its own thread/callback; sleep briefly.
 fn drainEvents(watcher: *Watcher) !void {
-    if (nw.linux_poll_mode) {
-        try watcher.handle_read_ready();
-    } else {
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+    switch (Watcher.interfaceType) {
+        .polling => try watcher.handle_read_ready(),
+        .threaded => std.Thread.sleep(300 * std.time.ns_per_ms),
     }
 }
 
@@ -223,7 +221,7 @@ test "creating a file emits a 'created' event" {
 test "writing to a file emits a 'modified' event" {
     // kqueue watches directories only; file writes don't trigger a directory event,
     // so modifications are not reliably detectable in real time on this backend.
-    if (comptime !nw.detects_file_modifications) return error.SkipZigTest;
+    if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
 
@@ -516,7 +514,7 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
     // After renaming a file, a write to the new name should produce events in
     // the order [rename/old-name, rename/new-name, modify] so that a consumer
     // always knows the current identity of the file before seeing changes to it.
-    if (comptime !nw.detects_file_modifications) return error.SkipZigTest;
+    if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
 

@@ -8,26 +8,12 @@ pub fn build(b: *std.Build) void {
         break :blk b.option(
             bool,
             "macos_fsevents",
-            "Use the FSEvents backend on macOS instead of kqueue (requires Xcode frameworks)",
+            "Add the FSEvents backend on macOS (requires Xcode frameworks)",
         ) orelse false;
     } else false;
 
-    const linux_read_thread = b.option(
-        bool,
-        "linux_read_thread",
-        "Use a background thread on Linux (like macOS/Windows) instead of requiring the caller to drive the event loop via poll_fd/handle_read_ready",
-    ) orelse true;
-
-    const kqueue_dir_only = b.option(
-        bool,
-        "kqueue_dir_only",
-        "Use directory-only kqueue watches (lower fd usage, no real-time file modification detection). Default: false",
-    ) orelse false;
-
     const options = b.addOptions();
     options.addOption(bool, "macos_fsevents", macos_fsevents);
-    options.addOption(bool, "linux_read_thread", linux_read_thread);
-    options.addOption(bool, "kqueue_dir_only", kqueue_dir_only);
     const options_mod = options.createModule();
 
     const mod = b.addModule("nightwatch", .{
