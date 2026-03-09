@@ -80,7 +80,7 @@ const CliHandler = struct {
     }
 };
 
-fn run_linux(watcher: *nightwatch) !void {
+fn run_linux(watcher: *Watcher) !void {
     var fds = [_]std.posix.pollfd{
         .{ .fd = watcher.poll_fd(), .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = sig_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
@@ -242,7 +242,7 @@ pub fn main() !void {
         try stderr.interface.print("on watch: {s}\n", .{path});
     }
 
-    if (nightwatch.Default.interface_type == .polling) {
+    if (Watcher.interface_type == .polling) {
         try run_linux(&watcher);
     } else if (builtin.os.tag == .windows) {
         run_windows();
