@@ -167,6 +167,9 @@ pub fn main() !void {
     var buf: [4096]u8 = undefined;
     var stderr = std.fs.File.stderr().writer(&buf);
     defer stderr.interface.flush() catch {};
+    var out_buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&out_buf);
+    defer stdout.interface.flush() catch {};
 
     // Parse --ignore options and watch paths.
     // Ignored paths are made absolute (without resolving symlinks) so they
@@ -239,8 +242,8 @@ pub fn main() !void {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
             continue;
         };
-        try stderr.interface.print("# on watch: {s}\n", .{path});
-        try stderr.interface.flush();
+        try stdout.interface.print("# on watch: {s}\n", .{path});
+        try stdout.interface.flush();
     }
 
     if (Watcher.interface_type == .polling) {
