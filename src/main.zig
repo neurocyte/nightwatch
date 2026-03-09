@@ -23,6 +23,7 @@ fn posix_sighandler(_: c_int) callconv(.c) void {
 const CliHandler = struct {
     handler: Watcher.Handler,
     out: std.fs.File,
+    tty: std.io.tty.Config,
     ignore: []const []const u8,
 
     const vtable: Watcher.Handler.VTable = switch (Watcher.interface_type) {
@@ -43,20 +44,26 @@ const CliHandler = struct {
             if (std.mem.eql(u8, path, ignored)) return;
         }
         var buf: [4096]u8 = undefined;
-        var stdout = self.out.writer(&buf);
-        defer stdout.interface.flush() catch {};
+        var w = self.out.writer(&buf);
+        defer w.interface.flush() catch {};
+        const color: std.io.tty.Color = switch (event_type) {
+            .created => .green,
+            .modified => .blue,
+            .deleted => .red,
+            .renamed => .magenta,
+        };
         const event_label = switch (event_type) {
             .created => "create ",
             .modified => "modify ",
             .deleted => "delete ",
             .renamed => "rename ",
         };
-        const type_label = switch (object_type) {
-            .file => "file",
-            .dir => "dir ",
-            .unknown => "?   ",
-        };
-        stdout.interface.print("{s}  {s}  {s}\n", .{ event_label, type_label, path }) catch return error.HandlerFailed;
+        self.tty.setColor(&w.interface, color) catch return error.HandlerFailed;
+        w.interface.writeAll(event_label) catch return error.HandlerFailed;
+        self.tty.setColor(&w.interface, .reset) catch return error.HandlerFailed;
+        w.interface.writeAll("  ") catch return error.HandlerFailed;
+        self.writeTypeLabel(&w.interface, object_type) catch return error.HandlerFailed;
+        w.interface.print("  {s}\n", .{path}) catch return error.HandlerFailed;
     }
 
     fn rename_cb(h: *Watcher.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
@@ -65,14 +72,30 @@ const CliHandler = struct {
             if (std.mem.eql(u8, src, ignored) or std.mem.eql(u8, dst, ignored)) return;
         }
         var buf: [4096]u8 = undefined;
-        var stdout = self.out.writer(&buf);
-        defer stdout.interface.flush() catch {};
-        const type_label = switch (object_type) {
-            .file => "file",
-            .dir => "dir ",
-            .unknown => "?   ",
-        };
-        stdout.interface.print("rename   {s}  {s}  ->  {s}\n", .{ type_label, src, dst }) catch return error.HandlerFailed;
+        var w = self.out.writer(&buf);
+        defer w.interface.flush() catch {};
+        self.tty.setColor(&w.interface, .magenta) catch return error.HandlerFailed;
+        w.interface.writeAll("rename ") catch return error.HandlerFailed;
+        self.tty.setColor(&w.interface, .reset) catch return error.HandlerFailed;
+        w.interface.writeAll("  ") catch return error.HandlerFailed;
+        self.writeTypeLabel(&w.interface, object_type) catch return error.HandlerFailed;
+        w.interface.print("  {s}  ->  {s}\n", .{ src, dst }) catch return error.HandlerFailed;
+    }
+
+    fn writeTypeLabel(self: *CliHandler, w: *std.io.Writer, object_type: nightwatch.ObjectType) !void {
+        switch (object_type) {
+            .file => {
+                try self.tty.setColor(w, .cyan);
+                try w.writeAll("file");
+                try self.tty.setColor(w, .reset);
+            },
+            .dir => {
+                try self.tty.setColor(w, .yellow);
+                try w.writeAll("dir ");
+                try self.tty.setColor(w, .reset);
+            },
+            .unknown => try w.writeAll("?   "),
+        }
     }
 
     fn wait_readable_cb(_: *Watcher.Handler) error{HandlerFailed}!Watcher.Handler.ReadableStatus {
@@ -227,6 +250,7 @@ pub fn main() !void {
     var cli_handler = CliHandler{
         .handler = .{ .vtable = &CliHandler.vtable },
         .out = std.fs.File.stdout(),
+        .tty = std.io.tty.detectConfig(std.fs.File.stdout()),
         .ignore = ignore_list.items,
     };
 
@@ -242,7 +266,10 @@ pub fn main() !void {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
             continue;
         };
-        try stdout.interface.print("# on watch: {s}\n", .{path});
+        try cli_handler.tty.setColor(&stdout.interface, .dim);
+        try stdout.interface.print("# on watch: {s}", .{path});
+        try cli_handler.tty.setColor(&stdout.interface, .reset);
+        try stdout.interface.print("\n", .{});
         try stdout.interface.flush();
     }
 
