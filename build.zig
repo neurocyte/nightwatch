@@ -65,12 +65,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Integration test suite: exercises the public API by performing real
-    // filesystem operations and verifying Handler callbacks via TestHandler.
-    // Also imports nightwatch.zig (via the nightwatch module) and main.zig so
-    // any tests added there are included automatically.
-    const integration_tests = b.addTest(.{
-        .name = "integration_tests",
+    const tests = b.addTest(.{
+        .name = "tests",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/nightwatch_test.zig"),
             .target = target,
@@ -81,10 +77,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const run_integration_tests = b.addRunArtifact(integration_tests);
+    const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_tests.step);
 
-    b.installArtifact(integration_tests);
+    b.installArtifact(tests);
 }
