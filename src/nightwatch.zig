@@ -6,10 +6,7 @@ const types = @import("types.zig");
 pub const EventType = types.EventType;
 pub const ObjectType = types.ObjectType;
 pub const Error = types.Error;
-pub const ReadableStatus = types.ReadableStatus;
 pub const InterfaceType = types.InterfaceType;
-pub const Handler = types.Handler;
-pub const PollingHandler = types.PollingHandler;
 
 pub const Variant = switch (builtin.os.tag) {
     .linux => InterfaceType,
@@ -49,13 +46,21 @@ pub fn Create(comptime variant: Variant) type {
             },
             else => @compileError("unsupported OS"),
         };
-        pub const interfaceType: InterfaceType = switch (builtin.os.tag) {
+        pub const interface_type: InterfaceType = switch (builtin.os.tag) {
             .linux => variant,
             else => .threaded,
         };
+        pub const Handler = switch (interface_type) {
+            .threaded => types.Handler,
+            .polling => types.PollingHandler,
+        };
+        pub const InterceptorType = switch (interface_type) {
+            .threaded => Interceptor,
+            .polling => PollingInterceptor,
+        };
 
         allocator: std.mem.Allocator,
-        interceptor: *Interceptor,
+        interceptor: *InterceptorType,
 
         /// True if the current backend detects file content modifications in real time.
         /// False only when kqueue_dir_only=true, where directory-level watches are used
@@ -63,10 +68,10 @@ pub fn Create(comptime variant: Variant) type {
         pub const detects_file_modifications = Backend.detects_file_modifications;
 
         pub fn init(allocator: std.mem.Allocator, handler: *Handler) !@This() {
-            const ic = try allocator.create(Interceptor);
+            const ic = try allocator.create(InterceptorType);
             errdefer allocator.destroy(ic);
             ic.* = .{
-                .handler = .{ .vtable = &Interceptor.vtable },
+                .handler = .{ .vtable = &InterceptorType.vtable },
                 .user_handler = handler,
                 .allocator = allocator,
                 .backend = undefined,
@@ -153,7 +158,7 @@ pub fn Create(comptime variant: Variant) type {
                 return self.user_handler.rename(src, dst, object_type);
             }
 
-            fn wait_readable_cb(h: *Handler) error{HandlerFailed}!ReadableStatus {
+            fn wait_readable_cb(h: *Handler) error{HandlerFailed}!Handler.ReadableStatus {
                 const self: *Interceptor = @fieldParentPtr("handler", h);
                 return self.user_handler.wait_readable();
             }
@@ -171,8 +176,10 @@ pub fn Create(comptime variant: Variant) type {
                 .wait_readable = wait_readable_cb,
             };
 
-            fn change_cb(h: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
-                const self: *Interceptor = @fieldParentPtr("handler", h);
+            const PollingHandler = types.PollingHandler;
+
+            fn change_cb(h: *PollingHandler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
+                const self: *PollingInterceptor = @fieldParentPtr("handler", h);
                 if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
                     self.backend.add_watch(self.allocator, path) catch {};
                     recurse_watch(&self.backend, self.allocator, path);
@@ -180,13 +187,13 @@ pub fn Create(comptime variant: Variant) type {
                 return self.user_handler.change(path, event_type, object_type);
             }
 
-            fn rename_cb(h: *Handler, src: []const u8, dst: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
-                const self: *Interceptor = @fieldParentPtr("handler", h);
+            fn rename_cb(h: *PollingHandler, src: []const u8, dst: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
+                const self: *PollingInterceptor = @fieldParentPtr("handler", h);
                 return self.user_handler.rename(src, dst, object_type);
             }
 
-            fn wait_readable_cb(h: *Handler) error{HandlerFailed}!ReadableStatus {
-                const self: *Interceptor = @fieldParentPtr("handler", h);
+            fn wait_readable_cb(h: *PollingHandler) error{HandlerFailed}!PollingHandler.ReadableStatus {
+                const self: *PollingInterceptor = @fieldParentPtr("handler", h);
                 return self.user_handler.wait_readable();
             }
         };

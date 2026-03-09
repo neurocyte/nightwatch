@@ -2,6 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const nightwatch = @import("nightwatch");
 
+const Watcher = switch (builtin.os.tag) {
+    .linux => nightwatch.Create(.polling),
+    else => nightwatch.Default,
+};
+
 const is_posix = switch (builtin.os.tag) {
     .linux, .macos, .freebsd, .openbsd, .netbsd, .dragonfly => true,
     .windows => false,
@@ -16,16 +21,23 @@ fn posix_sighandler(_: c_int) callconv(.c) void {
 }
 
 const CliHandler = struct {
-    handler: nightwatch.Handler,
+    handler: Watcher.Handler,
     out: std.fs.File,
     ignore: []const []const u8,
 
-    const vtable = nightwatch.Handler.VTable{
-        .change = change_cb,
-        .rename = rename_cb,
+    const vtable: Watcher.Handler.VTable = switch (Watcher.interface_type) {
+        .polling => .{
+            .change = change_cb,
+            .rename = rename_cb,
+            .wait_readable = wait_readable_cb,
+        },
+        .threaded => .{
+            .change = change_cb,
+            .rename = rename_cb,
+        },
     };
 
-    fn change_cb(h: *nightwatch.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
+    fn change_cb(h: *Watcher.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         for (self.ignore) |ignored| {
             if (std.mem.eql(u8, path, ignored)) return;
@@ -47,7 +59,7 @@ const CliHandler = struct {
         stdout.interface.print("{s}  {s}  {s}\n", .{ event_label, type_label, path }) catch return error.HandlerFailed;
     }
 
-    fn rename_cb(h: *nightwatch.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
+    fn rename_cb(h: *Watcher.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         for (self.ignore) |ignored| {
             if (std.mem.eql(u8, src, ignored) or std.mem.eql(u8, dst, ignored)) return;
@@ -63,7 +75,7 @@ const CliHandler = struct {
         stdout.interface.print("rename   {s}  {s}  ->  {s}\n", .{ type_label, src, dst }) catch return error.HandlerFailed;
     }
 
-    fn wait_readable_cb(_: *nightwatch.Handler) error{HandlerFailed}!nightwatch.ReadableStatus {
+    fn wait_readable_cb(_: *Watcher.Handler) error{HandlerFailed}!Watcher.Handler.ReadableStatus {
         return .will_notify;
     }
 };
@@ -215,7 +227,11 @@ pub fn main() !void {
         .ignore = ignore_list.items,
     };
 
-    var watcher = try nightwatch.Default.init(allocator, &cli_handler.handler);
+    var watcher = switch (builtin.os.tag) {
+        .linux => try nightwatch.Create(.polling).init(allocator, &cli_handler.handler),
+        else => try nightwatch.Default.init(allocator, &cli_handler.handler),
+    };
+
     defer watcher.deinit();
 
     for (watch_paths.items) |path| {
@@ -226,7 +242,7 @@ pub fn main() !void {
         try stderr.interface.print("on watch: {s}\n", .{path});
     }
 
-    if (nightwatch.linux_poll_mode) {
+    if (nightwatch.Default.interface_type == .polling) {
         try run_linux(&watcher);
     } else if (builtin.os.tag == .windows) {
         run_windows();

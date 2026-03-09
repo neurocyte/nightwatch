@@ -22,7 +22,7 @@ const RecordedEvent = union(enum) {
 };
 
 const TestHandler = struct {
-    handler: nw.Handler,
+    handler: Watcher.Handler,
     allocator: std.mem.Allocator,
     events: std.ArrayListUnmanaged(RecordedEvent),
 
@@ -46,12 +46,12 @@ const TestHandler = struct {
     // vtable
     // -----------------------------------------------------------------------
 
-    const vtable = nw.Handler.VTable{
+    const vtable = Watcher.Handler.VTable{
         .change = change_cb,
         .rename = rename_cb,
     };
 
-    fn change_cb(handler: *nw.Handler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
+    fn change_cb(handler: *Watcher.Handler, path: []const u8, event_type: nw.EventType, object_type: nw.ObjectType) error{HandlerFailed}!void {
         const self: *TestHandler = @fieldParentPtr("handler", handler);
         const owned = self.allocator.dupe(u8, path) catch return error.HandlerFailed;
         self.events.append(self.allocator, .{
@@ -62,7 +62,7 @@ const TestHandler = struct {
         };
     }
 
-    fn rename_cb(handler: *nw.Handler, src: []const u8, dst: []const u8, _: nw.ObjectType) error{HandlerFailed}!void {
+    fn rename_cb(handler: *Watcher.Handler, src: []const u8, dst: []const u8, _: nw.ObjectType) error{HandlerFailed}!void {
         const self: *TestHandler = @fieldParentPtr("handler", handler);
         const owned_src = self.allocator.dupe(u8, src) catch return error.HandlerFailed;
         errdefer self.allocator.free(owned_src);
@@ -78,7 +78,7 @@ const TestHandler = struct {
     // On Linux the inotify backend calls wait_readable() inside arm() and
     // after each read-drain.  We return `will_notify` so it parks; the test
     // then calls handle_read_ready() explicitly to drive event delivery.
-    fn wait_readable_cb(handler: *nw.Handler) error{HandlerFailed}!nw.ReadableStatus {
+    fn wait_readable_cb(handler: *Watcher.Handler) error{HandlerFailed}!nw.ReadableStatus {
         _ = handler;
         return .will_notify;
     }
@@ -180,7 +180,7 @@ fn removeTempDir(path: []const u8) void {
 ///  - polling watchers: call handle_read_ready() so events are processed.
 ///  - threaded watchers: the backend uses its own thread/callback; sleep briefly.
 fn drainEvents(watcher: *Watcher) !void {
-    switch (Watcher.interfaceType) {
+    switch (Watcher.interface_type) {
         .polling => try watcher.handle_read_ready(),
         .threaded => std.Thread.sleep(300 * std.time.ns_per_ms),
     }

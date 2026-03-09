@@ -56,20 +56,20 @@ pub const PollingHandler = struct {
     };
 
     pub const VTable = struct {
-        change: *const fn (handler: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void,
-        rename: *const fn (handler: *Handler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void,
-        wait_readable: *const fn (handler: *Handler) error{HandlerFailed}!ReadableStatus,
+        change: *const fn (handler: *PollingHandler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void,
+        rename: *const fn (handler: *PollingHandler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void,
+        wait_readable: *const fn (handler: *PollingHandler) error{HandlerFailed}!ReadableStatus,
     };
 
-    pub fn change(handler: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
+    pub fn change(handler: *PollingHandler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
         return handler.vtable.change(handler, path, event_type, object_type);
     }
 
-    pub fn rename(handler: *Handler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
+    pub fn rename(handler: *PollingHandler, src_path: []const u8, dst_path: []const u8, object_type: ObjectType) error{HandlerFailed}!void {
         return handler.vtable.rename(handler, src_path, dst_path, object_type);
     }
 
-    pub fn wait_readable(handler: *Handler) error{HandlerFailed}!ReadableStatus {
+    pub fn wait_readable(handler: *PollingHandler) error{HandlerFailed}!ReadableStatus {
         return handler.vtable.wait_readable(handler);
     }
 };
