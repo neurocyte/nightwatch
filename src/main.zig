@@ -239,7 +239,7 @@ pub fn main() !void {
             try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
             continue;
         };
-        try stderr.interface.print("on watch: {s}\n", .{path});
+        try stderr.interface.print("# on watch: {s}\n", .{path});
         try stderr.interface.flush();
     }
 
