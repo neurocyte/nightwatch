@@ -16,14 +16,14 @@ pub const Variant = switch (builtin.os.tag) {
     else => @compileError("unsupported OS"),
 };
 
-pub const defaultVariant: Variant = switch (builtin.os.tag) {
+pub const default_variant: Variant = switch (builtin.os.tag) {
     .linux => .threaded,
     .macos, .freebsd, .openbsd, .netbsd, .dragonfly => .kqueue,
     .windows => .windows,
     else => @compileError("unsupported OS"),
 };
 
-pub const Default: type = Create(defaultVariant);
+pub const Default: type = Create(default_variant);
 
 pub fn Create(comptime variant: Variant) type {
     return struct {
