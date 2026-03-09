@@ -18,7 +18,8 @@ pub const Variant = switch (builtin.os.tag) {
 
 pub const default_variant: Variant = switch (builtin.os.tag) {
     .linux => .threaded,
-    .macos, .freebsd, .openbsd, .netbsd, .dragonfly => .kqueue,
+    .macos => if (build_options.macos_fsevents) .fsevents else .kqueue,
+    .freebsd, .openbsd, .netbsd, .dragonfly => .kqueue,
     .windows => .windows,
     else => @compileError("unsupported OS"),
 };
