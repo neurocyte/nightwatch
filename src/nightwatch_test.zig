@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const nw = @import("nightwatch");
+const main = @import("main");
 
 // ---------------------------------------------------------------------------
 // RecordedEvent

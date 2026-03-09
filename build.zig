@@ -55,28 +55,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args|
         run_cmd.addArgs(args);
 
-    const mod_tests = b.addTest(.{
-        .name = "mod_tests",
-        .root_module = mod,
+    const main_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "nightwatch", .module = mod },
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    const exe_tests = b.addTest(.{
-        .name = "exe_tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "nightwatch", .module = mod },
-                .{ .name = "build_options", .module = options_mod },
-            },
-        }),
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // Integration test suite: exercises the public API by performing real
     // filesystem operations and verifying Handler callbacks via TestHandler.
+    // Also imports nightwatch.zig (via the nightwatch module) and main.zig so
+    // any tests added there are included automatically.
     const integration_tests = b.addTest(.{
         .name = "integration_tests",
         .root_module = b.createModule(.{
@@ -85,17 +77,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "nightwatch", .module = mod },
+                .{ .name = "main", .module = main_mod },
             },
         }),
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_integration_tests.step);
 
-    b.installArtifact(mod_tests);
-    b.installArtifact(exe_tests);
     b.installArtifact(integration_tests);
 }

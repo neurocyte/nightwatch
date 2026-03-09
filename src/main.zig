@@ -281,5 +281,3 @@ pub fn main() !void {
         run_posix();
     }
 }
-
-test "simple test" {}
