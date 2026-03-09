@@ -5,16 +5,15 @@ pub const EventType = enum {
     created,
     modified,
     deleted,
-    /// Only produced on macOS and Windows where the OS gives no pairing info.
-    /// On Linux, paired renames are emitted as a rename event with both paths instead.
+    /// kqueue, FSEvents and Windows emit deleted and then created events for renames.
+    /// INotfiy emits a rename event with both paths instead.
     renamed,
 };
 
 pub const ObjectType = enum {
     file,
     dir,
-    /// The object type could not be determined (e.g. a deleted file on Windows
-    /// where the path no longer exists to query).
+    /// The object type is unknown on Windows when a file is deleted and no path exists to query.
     unknown,
 };
 

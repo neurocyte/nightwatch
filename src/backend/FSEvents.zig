@@ -173,7 +173,7 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, Arm
     ) orelse return error.ArmFailed;
     errdefer cf.FSEventStreamRelease(stream);
 
-    const queue = cf.dispatch_queue_create("flow.file_watcher", null);
+    const queue = cf.dispatch_queue_create("nightwatch", null);
     cf.FSEventStreamSetDispatchQueue(stream, queue);
     _ = cf.FSEventStreamStart(stream);
 
