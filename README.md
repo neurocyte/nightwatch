@@ -42,35 +42,34 @@ It simply keeps watch.
 
 ### Platform backends
 
-| Platform                                         | Backend                                                | Notes                                                              |
-| ------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------------------ |
-| Linux                                            | inotify                                                | Threaded mode (default) or poll mode (`-Dlinux_read_thread=false`) |
-| macOS                                            | kqueue (default) or FSEvents (`-Dmacos_fsevents=true`) | FSEvents requires Xcode frameworks                                 |
-| macOS (opt-in)                                   | kqueue dir-only (`-Dkqueue_dir_only=true`)             | Low fd usage; see note below                                       |
-| FreeBSD, OpenBSD, NetBSD, DragonFly BSD          | kqueue                                                 |                                                                    |
-| FreeBSD, OpenBSD, NetBSD, DragonFly BSD (opt-in) | kqueue dir-only (`-Dkqueue_dir_only=true`)             | Low fd usage; see note below                                       |
-| Windows                                          | ReadDirectoryChangesW                                  |                                                                    |
+| Platform                                | Backend                                                | Notes                              |
+| --------------------------------------- | ------------------------------------------------------ | ---------------------------------- |
+| Linux                                   | inotify                                                | Threaded (default) or polling mode |
+| macOS                                   | kqueue (default) or FSEvents (`-Dmacos_fsevents=true`) | FSEvents requires Xcode frameworks |
+| macOS                                   | kqueue dir-only (`.kqueuedir` variant)                 | Low fd usage; see note below       |
+| FreeBSD, OpenBSD, NetBSD, DragonFly BSD | kqueue (default)                                       |                                    |
+| FreeBSD, OpenBSD, NetBSD, DragonFly BSD | kqueue dir-only (`.kqueuedir` variant)                 | Low fd usage; see note below       |
+| Windows                                 | ReadDirectoryChangesW                                  |                                    |
 
-#### `kqueue_dir_only` mode
+#### `kqueuedir` variant
 
 By default the kqueue backend opens one file descriptor per watched _file_
 in order to detect `modified` events in real time via `EVFILT_VNODE`. At
 scale (e.g. 500k files) this exhausts the process fd limit.
 
-Build with `-Dkqueue_dir_only=true` to use directory-only kqueue watches
-instead. This drops fd usage from O(files) to O(directories) and removes
-the `setrlimit` call. The trade-off:
+Use `nightwatch.Create(.kqueuedir)` to select directory-only kqueue watches
+instead. This drops fd usage from O(files) to O(directories). The trade-off:
 
 - **`modified` events are not generated reliably.** The backend detects
   file modifications opportunistically by comparing mtimes during a
   directory scan, which only runs when a directory entry changes (file
   created, deleted, or renamed). A pure content write to an existing file
-  - with no sibling changes - will not trigger a scan and the
-  modification will be missed until the next scan.
+  with no sibling changes will not trigger a scan and the modification will
+  be missed until the next scan.
 
 - **Workaround:** Watch individual files directly (e.g.
   `watcher.watch("/path/to/file.txt")`). When a path passed to `watch()` is
-  a regular file, `kqueue_dir_only` mode attaches a per-file kqueue watch
+  a regular file, the `kqueuedir` variant attaches a per-file kqueue watch
   and emits real-time `modified` events exactly like the default backend.
   Only _directory tree_ watches are affected by the limitation above.
 
@@ -131,7 +130,7 @@ You now have programmatic access to the tracking engine.
 # CLI Usage
 
 ```bash
-nightwatch [{path}..]
+nightwatch [--ignore <path>]... <path> [<path> ...]
 ```
 
 Run:
