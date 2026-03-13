@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
         break :blk b.option(
             bool,
             "macos_fsevents",
-            "Add the FSEvents backend on macOS (requires Xcode frameworks)",
+            "Enable the FSEvents backend for macOS (requires Xcode frameworks)",
         ) orelse false;
     } else false;
 
