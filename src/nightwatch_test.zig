@@ -23,7 +23,7 @@ const RecordedEvent = union(enum) {
 };
 
 // ---------------------------------------------------------------------------
-// MakeTestHandler — adapts to the Handler type required by the given Watcher.
+// MakeTestHandler - adapts to the Handler type required by the given Watcher.
 // ---------------------------------------------------------------------------
 
 fn MakeTestHandler(comptime Watcher: type) type {
@@ -534,7 +534,7 @@ fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !v
 }
 
 // ---------------------------------------------------------------------------
-// Test blocks — each runs its case across all available variants.
+// Test blocks - each runs its case across all available variants.
 // ---------------------------------------------------------------------------
 
 test "creating a file emits a 'created' event" {

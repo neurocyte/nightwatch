@@ -8,6 +8,23 @@ pub const ObjectType = types.ObjectType;
 pub const Error = types.Error;
 pub const InterfaceType = types.InterfaceType;
 
+/// The set of backend variants available on the current platform.
+///
+/// On Linux this is `InterfaceType` (`.polling` or `.threaded`), since the
+/// only backend is inotify and the choice is how events are delivered.
+/// On macOS, BSD, and Windows the variants select the OS-level mechanism.
+/// Pass a value to `Create()` to get a watcher type for that variant.
+///
+/// On macOS the `.fsevents` variant is only present when the `macos_fsevents`
+/// build option is enabled. To enable it when using nightwatch as a dependency,
+/// pass the option in your `build.zig`:
+///
+/// ```zig
+/// const nightwatch_dep = b.dependency("nightwatch", .{
+///     .macos_fsevents = true,
+/// });
+/// exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
+/// ```
 pub const Variant = switch (builtin.os.tag) {
     .linux => InterfaceType,
     .macos => if (build_options.macos_fsevents) enum { fsevents, kqueue, kqueuedir } else enum { kqueue, kqueuedir },
@@ -16,6 +33,8 @@ pub const Variant = switch (builtin.os.tag) {
     else => @compileError("unsupported OS"),
 };
 
+/// The recommended variant for the current platform. `Default` is a
+/// shorthand for `Create(default_variant)`.
 pub const default_variant: Variant = switch (builtin.os.tag) {
     .linux => .threaded,
     .macos => if (build_options.macos_fsevents) .fsevents else .kqueue,
@@ -24,8 +43,27 @@ pub const default_variant: Variant = switch (builtin.os.tag) {
     else => @compileError("unsupported OS"),
 };
 
+/// A ready-to-use watcher type using the recommended backend for the current
+/// platform. Equivalent to `Create(default_variant)`.
 pub const Default: type = Create(default_variant);
 
+/// Returns a `Watcher` type parameterized on the given backend variant.
+///
+/// Typical usage:
+/// ```zig
+/// const Watcher = nightwatch.Default; // or nightwatch.Create(.kqueue), etc.
+/// var watcher = try Watcher.init(allocator, &my_handler.handler);
+/// defer watcher.deinit();
+/// try watcher.watch("/path/to/dir");
+/// ```
+///
+/// To iterate all available variants at comptime (e.g. in tests):
+/// ```zig
+/// inline for (comptime std.enums.values(nightwatch.Variant)) |v| {
+///     const W = nightwatch.Create(v);
+///     // ...
+/// }
+/// ```
 pub fn Create(comptime variant: Variant) type {
     return struct {
         pub const Backend = switch (builtin.os.tag) {
@@ -47,10 +85,14 @@ pub fn Create(comptime variant: Variant) type {
             },
             else => @compileError("unsupported OS"),
         };
+        /// Whether this watcher variant uses a background thread or requires
+        /// the caller to drive the event loop. See `InterfaceType`.
         pub const interface_type: InterfaceType = switch (builtin.os.tag) {
             .linux => variant,
             else => .threaded,
         };
+        /// The handler type expected by `init`. `Handler` for threaded
+        /// variants, `PollingHandler` for the polling variant.
         pub const Handler = switch (interface_type) {
             .threaded => types.Handler,
             .polling => types.PollingHandler,
@@ -63,11 +105,22 @@ pub fn Create(comptime variant: Variant) type {
         allocator: std.mem.Allocator,
         interceptor: *InterceptorType,
 
-        /// True if the current backend detects file content modifications in real time.
-        /// False only when kqueue_dir_only=true, where directory-level watches are used
-        /// and file writes do not trigger a directory NOTE_WRITE event.
+        /// Whether this backend detects file content modifications in real time.
+        ///
+        /// `false` only for the `kqueuedir` variant, which uses directory-level
+        /// kqueue watches. Because directory `NOTE_WRITE` events are not
+        /// triggered by writes to files inside the directory, file modifications
+        /// are not detected for unwatched files. Files added explicitly via
+        /// `watch()` do receive per-file `NOTE_WRITE` events and will report
+        /// modifications.
         pub const detects_file_modifications = Backend.detects_file_modifications;
 
+        /// Create a new watcher.
+        ///
+        /// `handler` must remain valid for the lifetime of the watcher. For
+        /// threaded variants the backend's internal thread will call into it
+        /// concurrently; for the polling variant calls happen synchronously
+        /// inside `handle_read_ready()`.
         pub fn init(allocator: std.mem.Allocator, handler: *Handler) !@This() {
             const ic = try allocator.create(InterceptorType);
             errdefer allocator.destroy(ic);
@@ -83,15 +136,27 @@ pub fn Create(comptime variant: Variant) type {
             return .{ .allocator = allocator, .interceptor = ic };
         }
 
+        /// Stop the watcher, release all watches, and free resources.
+        /// For threaded variants this joins the background thread.
         pub fn deinit(self: *@This()) void {
             self.interceptor.backend.deinit(self.allocator);
             self.allocator.destroy(self.interceptor);
         }
 
-        /// Watch a path (file or directory) for changes. The handler will receive
-        /// `change` and (linux only) `rename` calls. When path is a directory,
-        /// all subdirectories are watched recursively and new directories created
-        /// inside are watched automatically.
+        /// Watch a path for changes.
+        ///
+        /// `path` may be a file or a directory. Relative paths are resolved
+        /// against the current working directory at the time of the call.
+        /// Events are always delivered with absolute paths.
+        ///
+        /// When `path` is a directory, all existing subdirectories are watched
+        /// recursively and any newly created subdirectory is automatically
+        /// added to the watch set.
+        ///
+        /// The handler's `change` callback is called for every event. On
+        /// Linux (inotify), renames that can be paired atomically are delivered
+        /// via the `rename` callback instead; on all other platforms a rename
+        /// appears as a `deleted` event followed by a `created` event.
         pub fn watch(self: *@This(), path: []const u8) Error!void {
             // Make the path absolute without resolving symlinks so that callers who
             // pass "/tmp/foo" (where /tmp is a symlink) receive events with the same
@@ -110,21 +175,26 @@ pub fn Create(comptime variant: Variant) type {
             }
         }
 
-        /// Stop watching a previously watched path
+        /// Stop watching a previously watched path. Has no effect if `path`
+        /// was never watched. Does not unwatch subdirectories that were
+        /// added automatically as a result of watching `path`.
         pub fn unwatch(self: *@This(), path: []const u8) void {
             self.interceptor.backend.remove_watch(self.allocator, path);
         }
 
-        /// Drive event delivery by reading from the inotify fd.
-        /// Only available in Linux poll mode (linux_poll_mode == true).
+        /// Read pending events from the backend fd and deliver them to the handler.
+        ///
+        /// Only available for the `.polling` variant (Linux inotify). Call this
+        /// whenever `poll_fd()` is readable.
         pub fn handle_read_ready(self: *@This()) !void {
             comptime if (@hasDecl(Backend, "polling") and Backend.polling) @compileError("handle_read_ready is only available in polling backends");
             try self.interceptor.backend.handle_read_ready(self.allocator);
         }
 
-        /// Returns the inotify file descriptor that should be polled for POLLIN
-        /// before calling handle_read_ready().
-        /// Only available in Linux poll mode (linux_poll_mode == true).
+        /// Returns the file descriptor to poll for `POLLIN` before calling
+        /// `handle_read_ready()`.
+        ///
+        /// Only available for the `.polling` variant (Linux inotify).
         pub fn poll_fd(self: *const @This()) std.posix.fd_t {
             comptime if (@hasDecl(Backend, "polling") and Backend.polling) @compileError("poll_fd is only available in polling backends");
             return self.interceptor.backend.inotify_fd;
