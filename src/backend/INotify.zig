@@ -118,7 +118,10 @@ pub fn Create(comptime variant: InterfaceType) type {
                 .{ .fd = self.stop_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
             };
             while (true) {
-                _ = std.posix.poll(&pfds, -1) catch return;
+                _ = std.posix.poll(&pfds, -1) catch |e| {
+                    std.log.err("nightwatch: poll failed: {s}, stopping watch thread", .{@errorName(e)});
+                    return;
+                };
                 if (pfds[1].revents & std.posix.POLL.IN != 0) return; // stop signal
                 if (pfds[0].revents & std.posix.POLL.IN != 0) {
                     self.handle_read_ready(allocator) catch |e| {

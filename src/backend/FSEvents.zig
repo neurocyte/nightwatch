@@ -220,6 +220,11 @@ fn callback(
         // a single event.  Emit one change call per applicable flag so
         // callers see all relevant event types (e.g. created + modified).
         const ot: ObjectType = if (flags & kFSEventStreamEventFlagItemIsDir != 0) .dir else .file;
+        // Handler errors are silently ignored: this callback runs on a GCD
+        // dispatch thread managed by the OS, so there is no way to propagate
+        // an error back to the caller.  Stopping the stream from inside the
+        // callback would require a separate signal channel and is not worth
+        // the complexity; the stream will keep delivering future events.
         if (flags & kFSEventStreamEventFlagItemCreated != 0) {
             ctx.handler.change(path, .created, ot) catch {};
         }

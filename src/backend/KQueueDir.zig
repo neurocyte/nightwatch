@@ -97,7 +97,10 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
     var events: [64]std.posix.Kevent = undefined;
     while (true) {
         // Block indefinitely until kqueue has events.
-        const n = std.posix.kevent(self.kq, &.{}, &events, null) catch break;
+        const n = std.posix.kevent(self.kq, &.{}, &events, null) catch |e| {
+            std.log.err("nightwatch: kevent failed: {s}, stopping watch thread", .{@errorName(e)});
+            break;
+        };
         for (events[0..n]) |ev| {
             if (ev.filter == EVFILT_READ) return; // shutdown pipe readable, exit
             if (ev.filter != EVFILT_VNODE) continue;
@@ -151,7 +154,8 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                         return;
                     };
                 } else if (ev.fflags & NOTE_WRITE != 0) {
-                    self.scan_dir(allocator, watch_path) catch {};
+                    self.scan_dir(allocator, watch_path) catch |e|
+                        std.log.err("nightwatch: scan_dir failed: {s}", .{@errorName(e)});
                 }
             }
         }
@@ -216,10 +220,16 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
             }
         }
 
-        const gop = self.snapshots.getOrPut(allocator, dir_path) catch |e| {
-            return e;
-        };
-        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        const gop = self.snapshots.getOrPut(allocator, dir_path) catch |e| return e;
+        if (!gop.found_existing) {
+            // dir_path points into a stack buffer; dupe it into allocator memory
+            // so the snapshot key outlives the current thread_fn iteration.
+            gop.key_ptr.* = allocator.dupe(u8, dir_path) catch |e| {
+                _ = self.snapshots.remove(dir_path);
+                return e;
+            };
+            gop.value_ptr.* = .empty;
+        }
         const snapshot = gop.value_ptr;
 
         var cit = current_files.iterator();

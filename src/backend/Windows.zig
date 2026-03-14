@@ -198,7 +198,8 @@ fn thread_fn(
                     // the `info` pointer (which points into w.buf) a dangling reference.
                     const next_entry_offset = info.NextEntryOffset;
                     watches_mutex.unlock();
-                    handler.change(full_path, event_type, object_type) catch {
+                    handler.change(full_path, event_type, object_type) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
                         watches_mutex.lock();
                         break;
                     };
