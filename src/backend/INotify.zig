@@ -193,7 +193,7 @@ pub fn Create(comptime variant: InterfaceType) type {
             while (true) {
                 const n = std.posix.read(self.inotify_fd, &buf) catch |e| switch (e) {
                     error.WouldBlock => {
-                        // re-arm the file_discriptor
+                        // re-arm the file descriptor
                         try self.arm(allocator);
                         break;
                     },
