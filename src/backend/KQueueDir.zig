@@ -358,7 +358,10 @@ pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const 
         std.posix.close(entry.value.fd);
         allocator.free(entry.key);
     }
-    if (self.snapshots.fetchRemove(path)) |entry| {
+    self.snapshots_mutex.lock();
+    const snap_entry = self.snapshots.fetchRemove(path);
+    self.snapshots_mutex.unlock();
+    if (snap_entry) |entry| {
         var snap = entry.value;
         var it = snap.iterator();
         while (it.next()) |ne| allocator.free(ne.key_ptr.*);
