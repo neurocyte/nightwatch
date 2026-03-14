@@ -169,9 +169,14 @@ pub fn Create(comptime variant: Variant) type {
                 const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return error.WatchFailed;
                 break :blk std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ cwd, std.fs.path.sep, path }) catch return error.WatchFailed;
             };
-            try self.interceptor.backend.add_watch(self.allocator, abs_path);
+            // Collapse any . and .. segments without touching the filesystem so that
+            // relative inputs like "../sibling" or "./sub" produce the same watch key
+            // and event-path prefix as an equivalent absolute path would.
+            const norm = std.fs.path.resolve(self.allocator, &.{abs_path}) catch return error.WatchFailed;
+            defer self.allocator.free(norm);
+            try self.interceptor.backend.add_watch(self.allocator, norm);
             if (!Backend.watches_recursively) {
-                recurse_watch(&self.interceptor.backend, self.allocator, abs_path);
+                recurse_watch(&self.interceptor.backend, self.allocator, norm);
             }
         }
 
