@@ -221,13 +221,13 @@ fn callback(
     }
 }
 
-pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!void {
+pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory }!void {
     if (self.watches.contains(path)) return;
     const owned = try allocator.dupe(u8, path);
     errdefer allocator.free(owned);
     try self.watches.put(allocator, owned, {});
     self.stop_stream(allocator);
-    self.arm(allocator) catch {};
+    self.arm(allocator) catch return error.WatchFailed;
 }
 
 pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
