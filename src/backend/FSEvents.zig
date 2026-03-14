@@ -177,11 +177,17 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, Arm
         0.1,
         kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents,
     ) orelse return error.ArmFailed;
-    errdefer cf.FSEventStreamRelease(stream);
 
     const queue = cf.dispatch_queue_create("nightwatch", null);
     cf.FSEventStreamSetDispatchQueue(stream, queue);
-    _ = cf.FSEventStreamStart(stream);
+    // Stream and queue must be torn down together in the right order; a single
+    // errdefer block covering both is cleaner than two separate errdefers.
+    errdefer {
+        cf.FSEventStreamInvalidate(stream);
+        cf.FSEventStreamRelease(stream);
+        cf.dispatch_release(queue);
+    }
+    if (cf.FSEventStreamStart(stream) == 0) return error.ArmFailed;
 
     self.stream = stream;
     self.queue = queue;
