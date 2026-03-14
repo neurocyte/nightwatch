@@ -238,8 +238,8 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     self.arm(allocator) catch return error.WatchFailed;
 }
 
-pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
+pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{WatchFailed}!void {
     if (self.watches.fetchSwapRemove(path)) |entry| allocator.free(entry.key);
     self.stop_stream(allocator);
-    self.arm(allocator) catch {};
+    self.arm(allocator) catch return error.WatchFailed;
 }

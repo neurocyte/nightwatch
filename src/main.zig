@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const nightwatch = @import("nightwatch");
+const build_options = @import("build_options");
 
 const Watcher = switch (builtin.os.tag) {
     .linux => nightwatch.Create(.polling),
@@ -170,6 +171,27 @@ fn usage(out: std.fs.File) !void {
     try writer.interface.flush();
 }
 
+fn version(out: std.fs.File) !void {
+    var buf: [4096]u8 = undefined;
+    var writer = out.writer(&buf);
+    try writer.interface.print(
+        \\nightwatch version {s}
+        \\using: {s}
+        \\
+    , .{
+        @embedFile("version"),
+        @typeName(get_nightwatch().Backend),
+    });
+    try writer.interface.flush();
+}
+
+fn get_nightwatch() type {
+    return switch (builtin.os.tag) {
+        .linux => nightwatch.Create(.polling),
+        else => nightwatch.Default,
+    };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -182,8 +204,14 @@ pub fn main() !void {
         try usage(std.fs.File.stderr());
         std.process.exit(1);
     }
+
     if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
         try usage(std.fs.File.stdout());
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "--version")) {
+        try version(std.fs.File.stdout());
         return;
     }
 
@@ -254,10 +282,7 @@ pub fn main() !void {
         .ignore = ignore_list.items,
     };
 
-    var watcher = switch (builtin.os.tag) {
-        .linux => try nightwatch.Create(.polling).init(allocator, &cli_handler.handler),
-        else => try nightwatch.Default.init(allocator, &cli_handler.handler),
-    };
+    var watcher = try get_nightwatch().init(allocator, &cli_handler.handler);
 
     defer watcher.deinit();
 

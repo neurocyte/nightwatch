@@ -33,6 +33,17 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("CoreFoundation", .{});
     }
 
+    var version: std.ArrayList(u8) = .empty;
+    defer version.deinit(b.allocator);
+    gen_version(b, version.writer(b.allocator)) catch |e| {
+        if (b.release_mode != .off)
+            std.debug.panic("gen_version failed: {any}", .{e});
+        version.clearAndFree(b.allocator);
+        version.appendSlice(b.allocator, "unknown") catch {};
+    };
+    const write_file_step = b.addWriteFiles();
+    const version_file = write_file_step.add("version", version.items);
+
     const exe = b.addExecutable(.{
         .name = "nightwatch",
         .root_module = b.createModule(.{
@@ -45,6 +56,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addImport("version", b.createModule(.{ .root_source_file = version_file }));
 
     b.installArtifact(exe);
 
@@ -85,4 +97,15 @@ pub fn build(b: *std.Build) void {
     if (b.option(bool, "install_tests", "Install the tests executable to the output directory") orelse false) {
         b.installArtifact(tests);
     }
+}
+
+fn gen_version(b: *std.Build, writer: anytype) !void {
+    var code: u8 = 0;
+
+    const describe = try b.runAllowFail(&[_][]const u8{ "git", "describe", "--always", "--tags" }, &code, .Ignore);
+    const diff_ = try b.runAllowFail(&[_][]const u8{ "git", "diff", "--stat", "--patch", "HEAD" }, &code, .Ignore);
+    const diff = std.mem.trimRight(u8, diff_, "\r\n ");
+    const version = std.mem.trimRight(u8, describe, "\r\n ");
+
+    try writer.print("{s}{s}", .{ version, if (diff.len > 0) "-dirty" else "" });
 }
