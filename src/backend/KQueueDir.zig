@@ -331,6 +331,7 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
     self.snapshots_mutex.lock();
+    errdefer self.snapshots_mutex.unlock();
     const gop = try self.snapshots.getOrPut(allocator, dir_path);
     if (!gop.found_existing) gop.value_ptr.* = .empty;
     const snapshot = gop.value_ptr;

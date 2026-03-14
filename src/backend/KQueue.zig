@@ -386,6 +386,7 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
     self.snapshots_mutex.lock();
+    errdefer self.snapshots_mutex.unlock();
     const gop = try self.snapshots.getOrPut(allocator, dir_path);
     if (!gop.found_existing) gop.value_ptr.* = .empty;
     var snapshot = gop.value_ptr;
