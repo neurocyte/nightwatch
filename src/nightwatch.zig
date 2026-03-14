@@ -228,11 +228,6 @@ pub fn Create(comptime variant: Variant) type {
                 const self: *Interceptor = @fieldParentPtr("handler", h);
                 return self.user_handler.rename(src, dst, object_type);
             }
-
-            fn wait_readable_cb(h: *Handler) error{HandlerFailed}!Handler.ReadableStatus {
-                const self: *Interceptor = @fieldParentPtr("handler", h);
-                return self.user_handler.wait_readable();
-            }
         };
 
         const PollingInterceptor = struct {
