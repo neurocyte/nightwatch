@@ -274,6 +274,12 @@ fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []con
         return;
     };
     self.file_watches_mutex.lock();
+    if (self.file_watches.contains(path)) {
+        self.file_watches_mutex.unlock();
+        std.posix.close(fd);
+        allocator.free(owned);
+        return;
+    }
     self.file_watches.put(allocator, owned, fd) catch {
         self.file_watches_mutex.unlock();
         std.posix.close(fd);
@@ -350,6 +356,12 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     };
     const owned_path = try allocator.dupe(u8, path);
     self.watches_mutex.lock();
+    if (self.watches.contains(path)) {
+        self.watches_mutex.unlock();
+        std.posix.close(path_fd);
+        allocator.free(owned_path);
+        return;
+    }
     self.watches.put(allocator, owned_path, path_fd) catch |e| {
         self.watches_mutex.unlock();
         allocator.free(owned_path);
