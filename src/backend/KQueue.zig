@@ -184,6 +184,11 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var to_create: std.ArrayListUnmanaged([]const u8) = .empty;
     var to_delete: std.ArrayListUnmanaged([]const u8) = .empty;
     var new_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
+    // to_delete items are owned (removed from snapshot) only after the fetchRemove
+    // loop inside the mutex block.  Track this so the defer below only frees them
+    // once ownership has actually been transferred.
+    var to_delete_owned = false;
+    defer if (to_delete_owned) for (to_delete.items) |name| allocator.free(name);
 
     self.snapshots_mutex.lock();
     errdefer self.snapshots_mutex.unlock();
@@ -222,6 +227,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
             try to_delete.append(tmp, entry.key_ptr.*);
         }
         for (to_delete.items) |name| _ = snapshot.fetchRemove(name);
+        to_delete_owned = true; // ownership transferred; defer will free all items
     }
     self.snapshots_mutex.unlock();
 
@@ -231,7 +237,6 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     for (new_dirs.items) |full_path|
         try self.handler.change(full_path, EventType.created, .dir);
     for (to_delete.items) |name| {
-        defer allocator.free(name); // snapshot key, owned by allocator
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
         self.deregister_file_watch(allocator, full_path);
