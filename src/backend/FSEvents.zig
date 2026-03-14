@@ -12,6 +12,10 @@ stream: ?*anyopaque, // FSEventStreamRef
 queue: ?*anyopaque, // dispatch_queue_t
 ctx: ?*CallbackContext, // heap-allocated, freed after stream is stopped
 watches: std.StringArrayHashMapUnmanaged(void), // owned paths
+// last_seen_event_id is used to resume stream without missing events on
+// rebuild; no atomic needed - arm() only reads this after stop_stream(),
+// which calls FSEventStreamInvalidate and drains the GCD queue first
+last_seen_event_id: ?u64,
 
 const threaded = false; // callback fires on GCD thread; no FW_event needed
 
@@ -75,6 +79,7 @@ const CallbackContext = struct {
     // spurious events for the root directories themselves that FSEvents
     // sometimes delivers as historical events at stream start.
     watched_roots: []const []const u8, // owned slice of owned strings
+    last_event_id: *?u64, // points to FSEvents.last_seen_event_id
 };
 
 pub fn init(handler: *Handler) error{}!@This() {
@@ -84,6 +89,7 @@ pub fn init(handler: *Handler) error{}!@This() {
         .queue = null,
         .ctx = null,
         .watches = .empty,
+        .last_seen_event_id = null,
     };
 }
 
@@ -158,7 +164,7 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, Arm
 
     const ctx = try allocator.create(CallbackContext);
     errdefer allocator.destroy(ctx);
-    ctx.* = .{ .handler = self.handler, .watched_roots = roots };
+    ctx.* = .{ .handler = self.handler, .watched_roots = roots, .last_event_id = &self.last_seen_event_id };
 
     // FSEventStreamCreate copies the context struct; stack allocation is fine.
     const stream_ctx = FSEventStreamContext{ .version = 0, .info = ctx };
@@ -167,7 +173,7 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, Arm
         @ptrCast(&callback),
         &stream_ctx,
         paths_array,
-        kFSEventStreamEventIdSinceNow,
+        self.last_seen_event_id orelse kFSEventStreamEventIdSinceNow,
         0.1,
         kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents,
     ) orelse return error.ArmFailed;
@@ -188,13 +194,15 @@ fn callback(
     num_events: usize,
     event_paths: *anyopaque,
     event_flags: [*]const u32,
-    _: [*]const u64,
+    event_ids: [*]const u64,
 ) callconv(.c) void {
     const ctx: *CallbackContext = @ptrCast(@alignCast(info orelse return));
     const paths: [*][*:0]const u8 = @ptrCast(@alignCast(event_paths));
     outer: for (0..num_events) |i| {
         const path = std.mem.sliceTo(paths[i], 0);
         const flags = event_flags[i];
+        const eid = event_ids[i];
+        if (ctx.last_event_id.* == null or eid > ctx.last_event_id.*.?) ctx.last_event_id.* = eid;
 
         // Skip events for the watched root dirs themselves; FSEvents often
         // delivers spurious historical events for them at stream start.
