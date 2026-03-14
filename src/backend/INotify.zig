@@ -27,6 +27,7 @@ pub fn Create(comptime variant: InterfaceType) type {
 
         pub const watches_recursively = false;
         pub const detects_file_modifications = true;
+        pub const polling = variant == .polling;
 
         const Handler = switch (variant) {
             .threaded => types.Handler,

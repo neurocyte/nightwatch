@@ -187,7 +187,7 @@ pub fn Create(comptime variant: Variant) type {
         /// Only available for the `.polling` variant (Linux inotify). Call this
         /// whenever `poll_fd()` is readable.
         pub fn handle_read_ready(self: *@This()) !void {
-            comptime if (@hasDecl(Backend, "polling") and Backend.polling) @compileError("handle_read_ready is only available in polling backends");
+            comptime if (!(@hasDecl(Backend, "polling") and Backend.polling)) @compileError("handle_read_ready is only available in polling backends");
             try self.interceptor.backend.handle_read_ready(self.allocator);
         }
 
@@ -196,7 +196,7 @@ pub fn Create(comptime variant: Variant) type {
         ///
         /// Only available for the `.polling` variant (Linux inotify).
         pub fn poll_fd(self: *const @This()) std.posix.fd_t {
-            comptime if (@hasDecl(Backend, "polling") and Backend.polling) @compileError("poll_fd is only available in polling backends");
+            comptime if (!(@hasDecl(Backend, "polling") and Backend.polling)) @compileError("poll_fd is only available in polling backends");
             return self.interceptor.backend.inotify_fd;
         }
 
