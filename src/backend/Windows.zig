@@ -140,7 +140,11 @@ fn thread_fn(
                     const info: *FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(w.buf[offset..].ptr));
                     const name_wchars = (&info.FileName).ptr[0 .. info.FileNameLength / 2];
                     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const name_len = std.unicode.utf16LeToUtf8(&name_buf, name_wchars) catch 0;
+                    const name_len = std.unicode.utf16LeToUtf8(&name_buf, name_wchars) catch {
+                        if (info.NextEntryOffset == 0) break;
+                        offset += info.NextEntryOffset;
+                        continue;
+                    };
                     const event_type: EventType = switch (info.Action) {
                         FILE_ACTION_ADDED => .created,
                         FILE_ACTION_REMOVED => .deleted,
