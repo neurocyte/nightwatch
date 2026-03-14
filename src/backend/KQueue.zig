@@ -209,8 +209,8 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     }
 
     // Diff against snapshot under the lock; collect events to emit after releasing it.
-    // to_create / to_delete hold borrowed pointers into the snapshot (which uses
-    // allocator, not tmp); only the list metadata itself uses tmp.
+    // to_create / to_delete / new_dirs all use tmp (arena) so they are independent
+    // of the snapshot and remain valid after the mutex is released.
     var to_create: std.ArrayListUnmanaged([]const u8) = .empty;
     var to_delete: std.ArrayListUnmanaged([]const u8) = .empty;
     var new_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -220,8 +220,12 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var to_delete_owned = false;
     defer if (to_delete_owned) for (to_delete.items) |name| allocator.free(name);
 
+    // Use a boolean flag rather than errdefer to unlock the mutex.  An errdefer
+    // scoped to the whole function would fire again after the explicit unlock below,
+    // double-unlocking the mutex (UB) if handler.change() later returns an error.
     self.snapshots_mutex.lock();
-    errdefer self.snapshots_mutex.unlock();
+    var snapshots_locked = true;
+    defer if (snapshots_locked) self.snapshots_mutex.unlock();
     {
         for (current_dirs.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -254,7 +258,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
                 allocator.free(owned);
                 return e;
             };
-            try to_create.append(tmp, owned);
+            // Dupe into tmp so to_create holds arena-owned strings that remain
+            // valid after the mutex is released, even if remove_watch() frees
+            // the snapshot entry concurrently.
+            try to_create.append(tmp, try tmp.dupe(u8, owned));
         }
 
         var sit = snapshot.iterator();
@@ -265,6 +272,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         for (to_delete.items) |name| _ = snapshot.fetchRemove(name);
         to_delete_owned = true; // ownership transferred; defer will free all items
     }
+    snapshots_locked = false;
     self.snapshots_mutex.unlock();
 
     // Emit all events outside the lock so handlers may safely call watch()/unwatch().
@@ -449,7 +457,10 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
     for (names.items) |name| {
         if (snapshot.contains(name)) continue;
         const owned = try allocator.dupe(u8, name);
-        try snapshot.put(allocator, owned, {});
+        snapshot.put(allocator, owned, {}) catch |e| {
+            allocator.free(owned);
+            return e;
+        };
     }
     self.snapshots_mutex.unlock();
     // Register a kqueue watch for each existing file so writes are detected.

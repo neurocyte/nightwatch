@@ -172,7 +172,7 @@ pub fn Create(comptime variant: Variant) type {
             // Collapse any . and .. segments without touching the filesystem so that
             // relative inputs like "../sibling" or "./sub" produce the same watch key
             // and event-path prefix as an equivalent absolute path would.
-            const norm = std.fs.path.resolve(self.allocator, &.{abs_path}) catch return error.WatchFailed;
+            const norm = try std.fs.path.resolve(self.allocator, &.{abs_path});
             defer self.allocator.free(norm);
             try self.interceptor.backend.add_watch(self.allocator, norm);
             if (!Backend.watches_recursively) {
