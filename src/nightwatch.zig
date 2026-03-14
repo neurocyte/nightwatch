@@ -175,11 +175,18 @@ pub fn Create(comptime variant: Variant) type {
             }
         }
 
+        const UnwatchReturnType = @typeInfo(@TypeOf(Backend.remove_watch)).@"fn".return_type orelse void;
+        pub const UnwatchError = switch (@typeInfo(UnwatchReturnType)) {
+            .error_union => |info| info.error_set,
+            .void => error{},
+            else => @compileError("invalid remove_watch return type: " ++ @typeName(UnwatchReturnType)),
+        };
+
         /// Stop watching a previously watched path. Has no effect if `path`
         /// was never watched. Does not unwatch subdirectories that were
         /// added automatically as a result of watching `path`.
-        pub fn unwatch(self: *@This(), path: []const u8) void {
-            self.interceptor.backend.remove_watch(self.allocator, path);
+        pub fn unwatch(self: *@This(), path: []const u8) UnwatchError!void {
+            return self.interceptor.backend.remove_watch(self.allocator, path);
         }
 
         /// Read pending events from the backend fd and deliver them to the handler.

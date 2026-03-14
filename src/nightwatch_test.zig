@@ -395,7 +395,7 @@ fn testUnwatch(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try drainEvents(Watcher, &watcher);
     try std.testing.expect(th.hasChange(file1, .created, .file));
 
-    watcher.unwatch(tmp);
+    watcher.unwatch(tmp) catch return error.TestUnexpectedResult;
     const count_before = th.events.items.len;
 
     const file2 = try std.fs.path.join(allocator, &.{ tmp, "after_unwatch.txt" });
