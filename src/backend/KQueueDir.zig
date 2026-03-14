@@ -124,17 +124,32 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             if (is_file) {
                 // Explicit file watch: emit events with .file type directly.
                 if (ev.fflags & NOTE_DELETE != 0) {
-                    self.handler.change(watch_path, EventType.deleted, .file) catch return;
+                    self.handler.change(watch_path, EventType.deleted, .file) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 } else if (ev.fflags & NOTE_RENAME != 0) {
-                    self.handler.change(watch_path, EventType.renamed, .file) catch return;
+                    self.handler.change(watch_path, EventType.renamed, .file) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 } else if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0) {
-                    self.handler.change(watch_path, EventType.modified, .file) catch return;
+                    self.handler.change(watch_path, EventType.modified, .file) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 }
             } else {
                 if (ev.fflags & NOTE_DELETE != 0) {
-                    self.handler.change(watch_path, EventType.deleted, .dir) catch return;
+                    self.handler.change(watch_path, EventType.deleted, .dir) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 } else if (ev.fflags & NOTE_RENAME != 0) {
-                    self.handler.change(watch_path, EventType.renamed, .dir) catch return;
+                    self.handler.change(watch_path, EventType.renamed, .dir) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 } else if (ev.fflags & NOTE_WRITE != 0) {
                     self.scan_dir(allocator, watch_path) catch {};
                 }

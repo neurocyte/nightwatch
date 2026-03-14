@@ -121,7 +121,10 @@ pub fn Create(comptime variant: InterfaceType) type {
                 _ = std.posix.poll(&pfds, -1) catch return;
                 if (pfds[1].revents & std.posix.POLL.IN != 0) return; // stop signal
                 if (pfds[0].revents & std.posix.POLL.IN != 0) {
-                    self.handle_read_ready(allocator) catch return;
+                    self.handle_read_ready(allocator) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 }
             }
         }

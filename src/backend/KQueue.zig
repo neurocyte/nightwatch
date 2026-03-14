@@ -136,7 +136,10 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             if (file_path_len > 0) {
                 const fp = file_path_buf[0..file_path_len];
                 if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0)
-                    self.handler.change(fp, EventType.modified, .file) catch return;
+                    self.handler.change(fp, EventType.modified, .file) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
                 continue;
             }
 
@@ -157,9 +160,15 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             if (dir_path_len == 0) continue;
             const dir_path = dir_path_buf[0..dir_path_len];
             if (ev.fflags & NOTE_DELETE != 0) {
-                self.handler.change(dir_path, EventType.deleted, .dir) catch return;
+                self.handler.change(dir_path, EventType.deleted, .dir) catch |e| {
+                    std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                    return;
+                };
             } else if (ev.fflags & NOTE_RENAME != 0) {
-                self.handler.change(dir_path, EventType.renamed, .dir) catch return;
+                self.handler.change(dir_path, EventType.renamed, .dir) catch |e| {
+                    std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                    return;
+                };
             } else if (ev.fflags & NOTE_WRITE != 0) {
                 self.scan_dir(allocator, dir_path) catch {};
             }
