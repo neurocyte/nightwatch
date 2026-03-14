@@ -341,18 +341,31 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
 fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
+
+    // Collect (name, mtime) pairs without holding the lock so that statFile
+    // syscalls don't stall the background thread waiting for snapshots_mutex.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const tmp = arena.allocator();
+    const Entry = struct { name: []u8, mtime: i128 };
+    var entries: std.ArrayListUnmanaged(Entry) = .empty;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |e| {
+        if (e.kind != .file) continue;
+        const mtime = (dir.statFile(e.name) catch continue).mtime;
+        const name = tmp.dupe(u8, e.name) catch continue;
+        entries.append(tmp, .{ .name = name, .mtime = mtime }) catch continue;
+    }
+
     self.snapshots_mutex.lock();
     errdefer self.snapshots_mutex.unlock();
     const gop = try self.snapshots.getOrPut(allocator, dir_path);
     if (!gop.found_existing) gop.value_ptr.* = .empty;
     const snapshot = gop.value_ptr;
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (snapshot.contains(entry.name)) continue;
-        const mtime = (dir.statFile(entry.name) catch continue).mtime;
-        const owned = allocator.dupe(u8, entry.name) catch continue;
-        snapshot.put(allocator, owned, mtime) catch allocator.free(owned);
+    for (entries.items) |e| {
+        if (snapshot.contains(e.name)) continue;
+        const owned = allocator.dupe(u8, e.name) catch continue;
+        snapshot.put(allocator, owned, e.mtime) catch allocator.free(owned);
     }
     self.snapshots_mutex.unlock();
 }
