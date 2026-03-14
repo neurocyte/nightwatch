@@ -15,6 +15,14 @@ pub fn Create(comptime variant: InterfaceType) type {
         handler: *Handler,
         inotify_fd: std.posix.fd_t,
         watches: std.AutoHashMapUnmanaged(i32, []u8), // wd -> owned path
+        // Protects `watches` against concurrent access by the background thread
+        // (handle_read_ready / has_watch_for_path) and the main thread
+        // (add_watch / remove_watch).  Void for the polling variant, which is
+        // single-threaded.
+        watches_mutex: switch (variant) {
+            .threaded => std.Thread.Mutex,
+            .polling => void,
+        },
         pending_renames: std.ArrayListUnmanaged(PendingRename),
         stop_pipe: switch (variant) {
             .threaded => [2]std.posix.fd_t,
@@ -52,6 +60,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                         .handler = handler,
                         .inotify_fd = inotify_fd,
                         .watches = .empty,
+                        .watches_mutex = .{},
                         .pending_renames = .empty,
                         .stop_pipe = stop_pipe,
                         .thread = null,
@@ -62,6 +71,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                         .handler = handler,
                         .inotify_fd = inotify_fd,
                         .watches = .empty,
+                        .watches_mutex = {},
                         .pending_renames = .empty,
                         .stop_pipe = {},
                         .thread = {},
@@ -129,12 +139,16 @@ pub fn Create(comptime variant: InterfaceType) type {
             }
             const owned_path = try allocator.dupe(u8, path);
             errdefer allocator.free(owned_path);
+            if (comptime variant == .threaded) self.watches_mutex.lock();
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
             const result = try self.watches.getOrPut(allocator, @intCast(wd));
             if (result.found_existing) allocator.free(result.value_ptr.*);
             result.value_ptr.* = owned_path;
         }
 
         pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
+            if (comptime variant == .threaded) self.watches_mutex.lock();
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
             var it = self.watches.iterator();
             while (it.next()) |entry| {
                 if (!std.mem.eql(u8, entry.value_ptr.*, path)) continue;
@@ -145,7 +159,9 @@ pub fn Create(comptime variant: InterfaceType) type {
             }
         }
 
-        fn has_watch_for_path(self: *const @This(), path: []const u8) bool {
+        fn has_watch_for_path(self: *@This(), path: []const u8) bool {
+            if (comptime variant == .threaded) self.watches_mutex.lock();
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
             var it = self.watches.iterator();
             while (it.next()) |entry| {
                 if (std.mem.eql(u8, entry.value_ptr.*, path)) return true;
@@ -185,7 +201,20 @@ pub fn Create(comptime variant: InterfaceType) type {
                     const ev: *const InotifyEvent = @ptrCast(@alignCast(buf[offset..].ptr));
                     const name_offset = offset + @sizeOf(InotifyEvent);
                     offset = name_offset + ev.len;
-                    const watched_path = self.watches.get(ev.wd) orelse continue;
+
+                    // Copy the watched path under the lock so a concurrent remove_watch
+                    // cannot free the slice while we are still reading from it.
+                    var watched_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    var watched_len: usize = 0;
+                    if (comptime variant == .threaded) self.watches_mutex.lock();
+                    if (self.watches.get(ev.wd)) |p| {
+                        @memcpy(watched_buf[0..p.len], p);
+                        watched_len = p.len;
+                    }
+                    if (comptime variant == .threaded) self.watches_mutex.unlock();
+                    if (watched_len == 0) continue;
+                    const watched_path = watched_buf[0..watched_len];
+
                     const name: []const u8 = if (ev.len > 0)
                         std.mem.sliceTo(buf[name_offset..][0..ev.len], 0)
                     else
