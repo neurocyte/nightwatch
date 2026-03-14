@@ -231,14 +231,11 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     for (new_dirs.items) |full_path|
         try self.handler.change(full_path, EventType.created, .dir);
     for (to_delete.items) |name| {
+        defer allocator.free(name); // snapshot key, owned by allocator
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch {
-            allocator.free(name);
-            continue;
-        };
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
         self.deregister_file_watch(allocator, full_path);
         try self.handler.change(full_path, EventType.deleted, .file);
-        allocator.free(name); // snapshot key, owned by allocator
     }
     for (to_create.items) |name| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
