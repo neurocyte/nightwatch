@@ -78,7 +78,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.watches.deinit(allocator);
     var sit = self.snapshots.iterator();
     while (sit.next()) |entry| {
-        // Keys are borrowed from self.watches and freed in the watches loop above.
+        allocator.free(entry.key_ptr.*); // independently owned; see take_snapshot/scan_dir
         var snap = entry.value_ptr.*;
         var nit = snap.iterator();
         while (nit.next()) |ne| allocator.free(ne.key_ptr.*);
@@ -385,7 +385,15 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
     self.snapshots_mutex.lock();
     errdefer self.snapshots_mutex.unlock();
     const gop = try self.snapshots.getOrPut(allocator, dir_path);
-    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    if (!gop.found_existing) {
+        // Snapshot outer keys are independently owned so they can be safely
+        // freed in deinit/remove_watch regardless of how the entry was created.
+        gop.key_ptr.* = allocator.dupe(u8, dir_path) catch |e| {
+            _ = self.snapshots.remove(dir_path);
+            return e;
+        };
+        gop.value_ptr.* = .empty;
+    }
     const snapshot = gop.value_ptr;
     for (entries.items) |e| {
         if (snapshot.contains(e.name)) continue;
@@ -407,6 +415,7 @@ pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const 
     const snap_entry = self.snapshots.fetchRemove(path);
     self.snapshots_mutex.unlock();
     if (snap_entry) |entry| {
+        allocator.free(entry.key); // independently owned; see take_snapshot/scan_dir
         var snap = entry.value;
         var it = snap.iterator();
         while (it.next()) |ne| allocator.free(ne.key_ptr.*);

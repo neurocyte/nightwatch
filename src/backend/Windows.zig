@@ -210,7 +210,8 @@ fn thread_fn(
             }
             // Re-arm ReadDirectoryChangesW for the next batch.
             w.overlapped = std.mem.zeroes(windows.OVERLAPPED);
-            _ = win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null);
+            if (win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null) == 0)
+                std.log.err("nightwatch: ReadDirectoryChangesW re-arm failed for {s}, future events lost", .{entry.key_ptr.*});
             break;
         }
         watches_mutex.unlock();

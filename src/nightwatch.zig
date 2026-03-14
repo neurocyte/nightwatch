@@ -225,7 +225,8 @@ pub fn Create(comptime variant: Variant) type {
             fn change_cb(h: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
                 const self: *Interceptor = @fieldParentPtr("handler", h);
                 if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
-                    self.backend.add_watch(self.allocator, path) catch {};
+                    self.backend.add_watch(self.allocator, path) catch |e|
+                        std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ path, @errorName(e) });
                     recurse_watch(&self.backend, self.allocator, path);
                 }
                 return self.user_handler.change(path, event_type, object_type);
@@ -254,7 +255,8 @@ pub fn Create(comptime variant: Variant) type {
             fn change_cb(h: *PollingHandler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
                 const self: *PollingInterceptor = @fieldParentPtr("handler", h);
                 if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
-                    self.backend.add_watch(self.allocator, path) catch {};
+                    self.backend.add_watch(self.allocator, path) catch |e|
+                        std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ path, @errorName(e) });
                     recurse_watch(&self.backend, self.allocator, path);
                 }
                 return self.user_handler.change(path, event_type, object_type);
@@ -280,7 +282,8 @@ pub fn Create(comptime variant: Variant) type {
                 if (entry.kind != .directory) continue;
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const sub = std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
-                backend.add_watch(allocator, sub) catch {};
+                backend.add_watch(allocator, sub) catch |e|
+                    std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ sub, @errorName(e) });
                 recurse_watch(backend, allocator, sub);
             }
         }
