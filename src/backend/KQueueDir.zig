@@ -17,7 +17,7 @@ watches_mutex: std.Thread.Mutex,
 // Per-directory snapshots: owned filename -> mtime_ns.
 // Used to diff on NOTE_WRITE: detects creates, deletes, and (opportunistically)
 // modifications when the same directory fires another event later.
-// Key: owned dir path (same as watches key), value: map of owned filename -> mtime_ns.
+// Key: independently owned dir path, value: map of owned filename -> mtime_ns.
 snapshots: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(i128)),
 snapshots_mutex: std.Thread.Mutex,
 

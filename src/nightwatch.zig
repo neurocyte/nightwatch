@@ -191,7 +191,13 @@ pub fn Create(comptime variant: Variant) type {
         /// was never watched. Does not unwatch subdirectories that were
         /// added automatically as a result of watching `path`.
         pub fn unwatch(self: *@This(), path: []const u8) UnwatchError!void {
-            return self.interceptor.backend.remove_watch(self.allocator, path);
+            // Normalize path the same way watch() does so that relative or
+            // dot-containing paths resolve to the same key that was stored.
+            const norm = std.fs.path.resolve(self.allocator, &.{path}) catch {
+                return; // OOM: treat as no-op; path was never watched under the resolved form
+            };
+            defer self.allocator.free(norm);
+            return self.interceptor.backend.remove_watch(self.allocator, norm);
         }
 
         /// Read pending events from the backend fd and deliver them to the handler.

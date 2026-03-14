@@ -16,7 +16,7 @@ watches_mutex: std.Thread.Mutex,
 file_watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned file path -> fd
 file_watches_mutex: std.Thread.Mutex,
 // Per-directory snapshots of filenames, used to diff on NOTE_WRITE.
-// Key: owned dir path (same as watches key), value: set of owned filenames.
+// Key: independently owned dir path, value: set of owned filenames.
 // Accessed from both the main thread (add_watch) and the background thread (scan_dir).
 snapshots: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)),
 snapshots_mutex: std.Thread.Mutex,
