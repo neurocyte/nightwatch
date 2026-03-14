@@ -167,7 +167,7 @@ pub fn Create(comptime variant: Variant) type {
             else blk: {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return error.WatchFailed;
-                break :blk std.fmt.bufPrint(&buf, "{s}/{s}", .{ cwd, path }) catch return error.WatchFailed;
+                break :blk std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ cwd, std.fs.path.sep, path }) catch return error.WatchFailed;
             };
             try self.interceptor.backend.add_watch(self.allocator, abs_path);
             if (!Backend.watches_recursively) {
@@ -272,7 +272,7 @@ pub fn Create(comptime variant: Variant) type {
             while (it.next() catch return) |entry| {
                 if (entry.kind != .directory) continue;
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
-                const sub = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+                const sub = std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
                 backend.add_watch(allocator, sub) catch {};
                 recurse_watch(backend, allocator, sub);
             }
