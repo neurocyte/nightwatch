@@ -49,7 +49,7 @@ const win32 = struct {
 handler: *Handler,
 iocp: windows.HANDLE,
 thread: ?std.Thread,
-watches: std.StringHashMapUnmanaged(Watch),
+watches: std.StringHashMapUnmanaged(*Watch),
 watches_mutex: std.Thread.Mutex,
 path_types: std.StringHashMapUnmanaged(ObjectType),
 
@@ -97,9 +97,11 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     if (self.thread) |t| t.join();
     var it = self.watches.iterator();
     while (it.next()) |entry| {
-        _ = win32.CloseHandle(entry.value_ptr.*.handle);
-        allocator.free(entry.value_ptr.*.path);
-        allocator.free(entry.value_ptr.*.buf);
+        const w = entry.value_ptr.*;
+        _ = win32.CloseHandle(w.handle);
+        allocator.free(w.path);
+        allocator.free(w.buf);
+        allocator.destroy(w);
     }
     self.watches.deinit(allocator);
     var pt_it = self.path_types.iterator();
@@ -116,7 +118,7 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} ||
 fn thread_fn(
     allocator: std.mem.Allocator,
     iocp: windows.HANDLE,
-    watches: *std.StringHashMapUnmanaged(Watch),
+    watches: *std.StringHashMapUnmanaged(*Watch),
     watches_mutex: *std.Thread.Mutex,
     path_types: *std.StringHashMapUnmanaged(ObjectType),
     handler: *Handler,
@@ -132,7 +134,7 @@ fn thread_fn(
         watches_mutex.lock();
         var it = watches.iterator();
         while (it.next()) |entry| {
-            const w = entry.value_ptr;
+            const w = entry.value_ptr.*;
             if (w.handle != triggered_handle) continue;
             if (bytes > 0) {
                 var offset: usize = 0;
@@ -236,23 +238,24 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     errdefer allocator.free(buf);
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
-    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
-    if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &overlapped, null) == 0)
+    // Heap-allocate Watch so its address (and &w.overlapped) is stable even
+    // if the watches map is resized by a concurrent add_watch call.
+    const w = try allocator.create(Watch);
+    errdefer allocator.destroy(w);
+    w.* = .{ .handle = handle, .buf = buf, .overlapped = std.mem.zeroes(windows.OVERLAPPED), .path = owned_path };
+    if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null) == 0)
         return error.WatchFailed;
-    try self.watches.put(allocator, owned_path, .{
-        .handle = handle,
-        .buf = buf,
-        .overlapped = overlapped,
-        .path = owned_path,
-    });
+    try self.watches.put(allocator, owned_path, w);
 }
 
 pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
     self.watches_mutex.lock();
     defer self.watches_mutex.unlock();
     if (self.watches.fetchRemove(path)) |entry| {
-        _ = win32.CloseHandle(entry.value.handle);
-        allocator.free(entry.value.path);
-        allocator.free(entry.value.buf);
+        const w = entry.value;
+        _ = win32.CloseHandle(w.handle);
+        allocator.free(w.path);
+        allocator.free(w.buf);
+        allocator.destroy(w);
     }
 }
