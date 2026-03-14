@@ -103,35 +103,40 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             if (ev.filter != EVFILT_VNODE) continue;
             const fd: std.posix.fd_t = @intCast(ev.ident);
 
+            // Copy the path under the lock so a concurrent remove_watch cannot
+            // free it before we finish using it.
+            var watch_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var watch_path_len: usize = 0;
+            var is_file: bool = false;
             self.watches_mutex.lock();
             var wit = self.watches.iterator();
-            var watch_path: ?[]const u8 = null;
-            var is_file: bool = false;
             while (wit.next()) |entry| {
                 if (entry.value_ptr.*.fd == fd) {
-                    watch_path = entry.key_ptr.*;
+                    @memcpy(watch_path_buf[0..entry.key_ptr.*.len], entry.key_ptr.*);
+                    watch_path_len = entry.key_ptr.*.len;
                     is_file = entry.value_ptr.*.is_file;
                     break;
                 }
             }
             self.watches_mutex.unlock();
-            if (watch_path == null) continue;
+            if (watch_path_len == 0) continue;
+            const watch_path = watch_path_buf[0..watch_path_len];
             if (is_file) {
                 // Explicit file watch: emit events with .file type directly.
                 if (ev.fflags & NOTE_DELETE != 0) {
-                    self.handler.change(watch_path.?, EventType.deleted, .file) catch return;
+                    self.handler.change(watch_path, EventType.deleted, .file) catch return;
                 } else if (ev.fflags & NOTE_RENAME != 0) {
-                    self.handler.change(watch_path.?, EventType.renamed, .file) catch return;
+                    self.handler.change(watch_path, EventType.renamed, .file) catch return;
                 } else if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0) {
-                    self.handler.change(watch_path.?, EventType.modified, .file) catch return;
+                    self.handler.change(watch_path, EventType.modified, .file) catch return;
                 }
             } else {
                 if (ev.fflags & NOTE_DELETE != 0) {
-                    self.handler.change(watch_path.?, EventType.deleted, .dir) catch return;
+                    self.handler.change(watch_path, EventType.deleted, .dir) catch return;
                 } else if (ev.fflags & NOTE_RENAME != 0) {
-                    self.handler.change(watch_path.?, EventType.renamed, .dir) catch return;
+                    self.handler.change(watch_path, EventType.renamed, .dir) catch return;
                 } else if (ev.fflags & NOTE_WRITE != 0) {
-                    self.scan_dir(allocator, watch_path.?) catch {};
+                    self.scan_dir(allocator, watch_path) catch {};
                 }
             }
         }

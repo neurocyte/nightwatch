@@ -119,32 +119,49 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             const fd: std.posix.fd_t = @intCast(ev.ident);
 
             // Check if this is a file watch: NOTE_WRITE/NOTE_EXTEND → modified.
+            // Copy the path under the lock so a concurrent remove_watch cannot
+            // free it before we finish using it.
+            var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var file_path_len: usize = 0;
             self.file_watches_mutex.lock();
             var fwit = self.file_watches.iterator();
-            const file_path: ?[]const u8 = while (fwit.next()) |entry| {
-                if (entry.value_ptr.* == fd) break entry.key_ptr.*;
-            } else null;
+            while (fwit.next()) |entry| {
+                if (entry.value_ptr.* == fd) {
+                    @memcpy(file_path_buf[0..entry.key_ptr.*.len], entry.key_ptr.*);
+                    file_path_len = entry.key_ptr.*.len;
+                    break;
+                }
+            }
             self.file_watches_mutex.unlock();
-            if (file_path) |fp| {
+            if (file_path_len > 0) {
+                const fp = file_path_buf[0..file_path_len];
                 if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0)
                     self.handler.change(fp, EventType.modified, .file) catch return;
                 continue;
             }
 
             // Otherwise look up the directory path for this fd.
+            // Same copy-under-lock pattern.
+            var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var dir_path_len: usize = 0;
             self.watches_mutex.lock();
             var wit = self.watches.iterator();
-            const dir_path: ?[]const u8 = while (wit.next()) |entry| {
-                if (entry.value_ptr.* == fd) break entry.key_ptr.*;
-            } else null;
+            while (wit.next()) |entry| {
+                if (entry.value_ptr.* == fd) {
+                    @memcpy(dir_path_buf[0..entry.key_ptr.*.len], entry.key_ptr.*);
+                    dir_path_len = entry.key_ptr.*.len;
+                    break;
+                }
+            }
             self.watches_mutex.unlock();
-            if (dir_path == null) continue;
+            if (dir_path_len == 0) continue;
+            const dir_path = dir_path_buf[0..dir_path_len];
             if (ev.fflags & NOTE_DELETE != 0) {
-                self.handler.change(dir_path.?, EventType.deleted, .dir) catch return;
+                self.handler.change(dir_path, EventType.deleted, .dir) catch return;
             } else if (ev.fflags & NOTE_RENAME != 0) {
-                self.handler.change(dir_path.?, EventType.renamed, .dir) catch return;
+                self.handler.change(dir_path, EventType.renamed, .dir) catch return;
             } else if (ev.fflags & NOTE_WRITE != 0) {
-                self.scan_dir(allocator, dir_path.?) catch {};
+                self.scan_dir(allocator, dir_path) catch {};
             }
         }
     }
