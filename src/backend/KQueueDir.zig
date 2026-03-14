@@ -180,6 +180,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var new_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
 
     self.snapshots_mutex.lock();
+    errdefer self.snapshots_mutex.unlock();
     {
         for (current_dirs.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -191,7 +192,6 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         }
 
         const gop = self.snapshots.getOrPut(allocator, dir_path) catch |e| {
-            self.snapshots_mutex.unlock();
             return e;
         };
         if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -208,12 +208,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
             } else {
                 // New file — add to snapshot and to_create list.
                 const owned = allocator.dupe(u8, entry.key_ptr.*) catch |e| {
-                    self.snapshots_mutex.unlock();
                     return e;
                 };
                 snapshot.put(allocator, owned, entry.value_ptr.*) catch |e| {
                     allocator.free(owned);
-                    self.snapshots_mutex.unlock();
                     return e;
                 };
                 try to_create.append(tmp, owned); // borrow from snapshot
