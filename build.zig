@@ -4,16 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const options = b.addOptions();
+    const install_tests = b.option(bool, "install_tests", "Install the tests executable to the output directory") orelse false;
     const macos_fsevents = if (target.result.os.tag == .macos) blk: {
-        break :blk b.option(
+        const macos_fsevents = b.option(
             bool,
             "macos_fsevents",
             "Enable the FSEvents backend for macOS (requires Xcode frameworks)",
         ) orelse false;
+        options.addOption(bool, "macos_fsevents", macos_fsevents);
+        break :blk macos_fsevents;
     } else false;
-
-    const options = b.addOptions();
-    options.addOption(bool, "macos_fsevents", macos_fsevents);
+    options.addOption(bool, "install_tests", install_tests);
     const options_mod = options.createModule();
 
     const mod = b.addModule("nightwatch", .{
@@ -94,7 +96,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
 
-    if (b.option(bool, "install_tests", "Install the tests executable to the output directory") orelse false) {
+    if (install_tests) {
         b.installArtifact(tests);
     }
 }
