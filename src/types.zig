@@ -11,11 +11,22 @@ pub const EventType = enum {
     deleted,
     /// A file or directory was renamed or moved.
     ///
-    /// INotify delivers this as a single `rename` callback with both the
-    /// source and destination paths. All other backends (kqueue, FSEvents,
-    /// Windows) cannot pair the two sides atomically and emit a `deleted`
-    /// event for the old path followed by a `created` event for the new
-    /// path instead.
+    /// Delivery varies by backend:
+    ///
+    /// - **INotify**: renames within the watched tree are delivered as a
+    ///   single atomic `rename` callback with both source and destination
+    ///   paths. A move out of the tree appears as `deleted`; a move into
+    ///   the tree appears as `created`.
+    ///
+    /// - **kqueue / kqueuedir**: when a watched *directory* is itself
+    ///   renamed, a `renamed` change event is emitted for the old directory
+    ///   path (the new path is not known). Renames of *files inside* a
+    ///   watched directory are detected indirectly via directory-level
+    ///   `NOTE_WRITE` events and appear as a `deleted` event for the old
+    ///   name followed by a `created` event for the new name.
+    ///
+    /// - **FSEvents / Windows**: each path involved in a rename receives
+    ///   its own `renamed` change event; the two sides are not paired.
     renamed,
 };
 

@@ -53,6 +53,22 @@ sleep 0.4
 
 echo "[op] rmdir subdir"
 rmdir "$TESTDIR/subdir"
+sleep 0.4
+
+echo "[op] mkdir dirA"
+mkdir "$TESTDIR/dirA"
+sleep 0.4
+
+echo "[op] touch dirA/file3.txt"
+touch "$TESTDIR/dirA/file3.txt"
+sleep 0.4
+
+echo "[op] rename dirA -> dirB"
+mv "$TESTDIR/dirA" "$TESTDIR/dirB"
+sleep 0.4
+
+echo "[op] rmdir dirB (and contents)"
+rm -rf "$TESTDIR/dirB"
 sleep 0.5
 
 echo ""
