@@ -168,8 +168,11 @@ fn thread_fn(
                         continue;
                     };
                     // Determine object_type: try GetFileAttributesW; cache result.
-                    const object_type: ObjectType = if (event_type == .deleted) blk: {
-                        // Path no longer exists; use cached type if available.
+                    // For deleted paths and the old name in a rename, the path no
+                    // longer exists at event time so GetFileAttributesW would fail;
+                    // use the cached type instead.
+                    const object_type: ObjectType = if (event_type == .deleted or
+                        info.Action == FILE_ACTION_RENAMED_OLD_NAME) blk: {
                         const cached = path_types.fetchRemove(full_path);
                         break :blk if (cached) |kv| blk2: {
                             allocator.free(kv.key);
@@ -251,6 +254,36 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null) == 0)
         return error.WatchFailed;
     try self.watches.put(allocator, owned_path, w);
+    // Seed path_types with pre-existing entries so delete/rename events for
+    // paths that existed before this watch started can resolve their ObjectType.
+    self.scan_path_types(allocator, owned_path);
+}
+
+// Walk root recursively and seed path_types with the type of every entry.
+// Called from add_watch (mutex already held) so pre-existing paths are
+// known before any FILE_ACTION_REMOVED or FILE_ACTION_RENAMED_OLD_NAME fires.
+fn scan_path_types(self: *@This(), allocator: std.mem.Allocator, root: []const u8) void {
+    var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const ot: ObjectType = switch (entry.kind) {
+            .directory => .dir,
+            .file => .file,
+            else => continue,
+        };
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ root, entry.name }) catch continue;
+        const gop = self.path_types.getOrPut(allocator, full_path) catch continue;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
+                _ = self.path_types.remove(full_path);
+                continue;
+            };
+        }
+        gop.value_ptr.* = ot;
+        if (ot == .dir) self.scan_path_types(allocator, gop.key_ptr.*);
+    }
 }
 
 pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
