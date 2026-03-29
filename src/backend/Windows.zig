@@ -197,6 +197,10 @@ fn thread_fn(
                             }
                             gop.value_ptr.* = ot;
                         }
+                        // When a directory is renamed, scan its children so that
+                        // subsequent delete events for contents can resolve their type.
+                        if (ot == .dir and info.Action == FILE_ACTION_RENAMED_NEW_NAME)
+                            scan_path_types_into(allocator, path_types, full_path);
                         break :blk ot;
                     };
                     // Capture next_entry_offset before releasing the mutex: after unlock,
@@ -260,9 +264,14 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
 }
 
 // Walk root recursively and seed path_types with the type of every entry.
-// Called from add_watch (mutex already held) so pre-existing paths are
-// known before any FILE_ACTION_REMOVED or FILE_ACTION_RENAMED_OLD_NAME fires.
+// Called from add_watch and from thread_fn on directory renames so that
+// FILE_ACTION_REMOVED events for children of a renamed directory can
+// resolve their ObjectType from cache.
 fn scan_path_types(self: *@This(), allocator: std.mem.Allocator, root: []const u8) void {
+    scan_path_types_into(allocator, &self.path_types, root);
+}
+
+fn scan_path_types_into(allocator: std.mem.Allocator, path_types: *std.StringHashMapUnmanaged(ObjectType), root: []const u8) void {
     var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch return;
     defer dir.close();
     var iter = dir.iterate();
@@ -274,15 +283,15 @@ fn scan_path_types(self: *@This(), allocator: std.mem.Allocator, root: []const u
         };
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ root, entry.name }) catch continue;
-        const gop = self.path_types.getOrPut(allocator, full_path) catch continue;
+        const gop = path_types.getOrPut(allocator, full_path) catch continue;
         if (!gop.found_existing) {
             gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
-                _ = self.path_types.remove(full_path);
+                _ = path_types.remove(full_path);
                 continue;
             };
         }
         gop.value_ptr.* = ot;
-        if (ot == .dir) self.scan_path_types(allocator, gop.key_ptr.*);
+        if (ot == .dir) scan_path_types_into(allocator, path_types, gop.key_ptr.*);
     }
 }
 
