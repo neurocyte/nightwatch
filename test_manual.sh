@@ -14,12 +14,13 @@ if [ ! -x "$NW" ]; then
 fi
 
 TESTDIR=$(mktemp -d)
-echo "--- watching $TESTDIR ---"
+TESTDIR2=$(mktemp -d)
+echo "--- watching $TESTDIR and $TESTDIR2 ---"
 echo "--- starting nightwatch (Ctrl-C to stop early) ---"
 echo ""
 
-# Start nightwatch in background, events go to stdout
-"$NW" "$TESTDIR" &
+# Start nightwatch in background watching both dirs, events go to stdout
+"$NW" "$TESTDIR" "$TESTDIR2" &
 NW_PID=$!
 sleep 0.5
 
@@ -72,7 +73,36 @@ rm -rf "$TESTDIR/dirB"
 sleep 0.5
 
 echo ""
+echo "# cross-root renames (both dirs watched)"
+echo ""
+
+echo "[op] mkdir subA in both roots"
+mkdir "$TESTDIR/subA"
+mkdir "$TESTDIR2/subA"
+sleep 0.4
+
+echo "[op] touch crossfile.txt in dir1"
+touch "$TESTDIR/crossfile.txt"
+sleep 0.4
+
+echo "[op] rename crossfile.txt: dir1 -> dir2 (root to root)"
+mv "$TESTDIR/crossfile.txt" "$TESTDIR2/crossfile.txt"
+sleep 0.4
+
+echo "[op] touch subA/crosssub.txt in dir1"
+touch "$TESTDIR/subA/crosssub.txt"
+sleep 0.4
+
+echo "[op] rename subA/crosssub.txt: dir1/subA -> dir2/subA (subdir to subdir)"
+mv "$TESTDIR/subA/crosssub.txt" "$TESTDIR2/subA/crosssub.txt"
+sleep 0.4
+
+echo "[op] rename subA: dir1 -> dir2 (subdir across roots)"
+mv "$TESTDIR/subA" "$TESTDIR2/subA2"
+sleep 0.5
+
+echo ""
 echo "--- done, stopping nightwatch ---"
 kill $NW_PID 2>/dev/null
 wait $NW_PID 2>/dev/null
-rm -rf "$TESTDIR"
+rm -rf "$TESTDIR" "$TESTDIR2"

@@ -14,15 +14,17 @@ if (-not (Test-Path $NW)) {
     exit 1
 }
 
-$TESTDIR = Join-Path $env:TEMP "nightwatch_manual_$PID"
-New-Item -ItemType Directory -Path $TESTDIR | Out-Null
+$TESTDIR  = Join-Path $env:TEMP "nightwatch_manual_$PID"
+$TESTDIR2 = Join-Path $env:TEMP "nightwatch_manual2_$PID"
+New-Item -ItemType Directory -Path $TESTDIR  | Out-Null
+New-Item -ItemType Directory -Path $TESTDIR2 | Out-Null
 
-Write-Host "--- watching $TESTDIR ---"
+Write-Host "--- watching $TESTDIR and $TESTDIR2 ---"
 Write-Host "--- starting nightwatch (Ctrl-C to stop early) ---"
 Write-Host ""
 
-# Start nightwatch in background, events go to stdout
-$proc = Start-Process -FilePath $NW -ArgumentList $TESTDIR -NoNewWindow -PassThru
+# Start nightwatch in background watching both dirs, events go to stdout
+$proc = Start-Process -FilePath $NW -ArgumentList $TESTDIR, $TESTDIR2 -NoNewWindow -PassThru
 Start-Sleep -Milliseconds 500
 
 Write-Host "[op] touch file1.txt"
@@ -74,7 +76,37 @@ Remove-Item -Recurse -Force -Path "$TESTDIR\dirB"
 Start-Sleep -Milliseconds 500
 
 Write-Host ""
+Write-Host "# cross-root renames (both dirs watched)"
+Write-Host ""
+
+Write-Host "[op] mkdir subA in both roots"
+New-Item -ItemType Directory -Path "$TESTDIR\subA"  | Out-Null
+New-Item -ItemType Directory -Path "$TESTDIR2\subA" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] touch crossfile.txt in dir1"
+New-Item -ItemType File -Path "$TESTDIR\crossfile.txt" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rename crossfile.txt: dir1 -> dir2 (root to root)"
+Move-Item -Path "$TESTDIR\crossfile.txt" -Destination "$TESTDIR2\crossfile.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] touch subA\crosssub.txt in dir1"
+New-Item -ItemType File -Path "$TESTDIR\subA\crosssub.txt" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rename subA\crosssub.txt: dir1\subA -> dir2\subA (subdir to subdir)"
+Move-Item -Path "$TESTDIR\subA\crosssub.txt" -Destination "$TESTDIR2\subA\crosssub.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rename subA: dir1 -> dir2 (subdir across roots)"
+Move-Item -Path "$TESTDIR\subA" -Destination "$TESTDIR2\subA2"
+Start-Sleep -Milliseconds 500
+
+Write-Host ""
 Write-Host "--- done, stopping nightwatch ---"
 Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
 $proc.WaitForExit()
 Remove-Item -Recurse -Force -Path $TESTDIR
+Remove-Item -Recurse -Force -Path $TESTDIR2
