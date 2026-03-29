@@ -36,6 +36,8 @@ pub fn Create(comptime variant: InterfaceType) type {
         pub const watches_recursively = false;
         pub const detects_file_modifications = true;
         pub const emits_close_events = true;
+        pub const emits_rename_for_files = true;
+        pub const emits_rename_for_dirs = true;
         pub const polling = variant == .polling;
 
         const WatchEntry = struct { path: []u8, is_dir: bool };

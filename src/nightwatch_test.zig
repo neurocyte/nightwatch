@@ -394,13 +394,54 @@ fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.fs.renameAbsolute(src_path, dst_path);
     try drainEvents(Watcher, &watcher);
 
-    if (builtin.os.tag == .linux) {
-        try std.testing.expect(th.hasRename(src_path, dst_path));
+    if (comptime Watcher.emits_rename_for_files) {
+        // INotify delivers a paired atomic rename callback; FSEvents/Windows
+        // deliver individual .renamed change events per path.
+        const has_rename = th.hasRename(src_path, dst_path) or
+            th.hasChange(src_path, .renamed, .file);
+        try std.testing.expect(has_rename);
     } else {
-        const has_old = th.hasChange(src_path, .renamed, .file) or th.hasChange(src_path, .deleted, .file);
-        const has_new = th.hasChange(dst_path, .renamed, .file) or th.hasChange(dst_path, .created, .file);
-        try std.testing.expect(has_old or has_new);
+        // KQueue/KQueueDir: file rename appears as delete + create.
+        try std.testing.expect(th.hasChange(src_path, .deleted, .file));
+        try std.testing.expect(th.hasChange(dst_path, .created, .file));
     }
+}
+
+fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    if (comptime !Watcher.emits_rename_for_dirs) return error.SkipZigTest;
+
+    const TH = MakeTestHandler(Watcher);
+
+    const tmp = try makeTempDir(allocator);
+    defer {
+        removeTempDir(tmp);
+        allocator.free(tmp);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    const src_path = try std.fs.path.join(allocator, &.{ tmp, "before" });
+    defer allocator.free(src_path);
+    const dst_path = try std.fs.path.join(allocator, &.{ tmp, "after" });
+    defer allocator.free(dst_path);
+
+    try std.fs.makeDirAbsolute(src_path);
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(tmp);
+
+    try std.fs.renameAbsolute(src_path, dst_path);
+    try drainEvents(Watcher, &watcher);
+
+    // All backends with emits_rename_for_dirs=true deliver at least a rename
+    // event for the source path. INotify delivers a paired rename callback;
+    // KQueue/KQueueDir deliver change(.renamed, .dir) for the old path only;
+    // FSEvents/Windows deliver change(.renamed, .dir) for both paths.
+    const has_rename = th.hasRename(src_path, dst_path) or
+        th.hasChange(src_path, .renamed, .dir);
+    try std.testing.expect(has_rename);
 }
 
 fn testUnwatchedDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
@@ -641,6 +682,12 @@ test "creating a sub-directory emits a 'created' event with object_type dir" {
 test "renaming a file is reported correctly per-platform" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testRenameFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "renaming a directory emits a rename event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testRenameDir(nw.Create(variant), std.testing.allocator);
     }
 }
 

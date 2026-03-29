@@ -7,6 +7,8 @@ const ObjectType = types.ObjectType;
 pub const watches_recursively = false;
 pub const detects_file_modifications = false;
 pub const emits_close_events = false;
+pub const emits_rename_for_files = false;
+pub const emits_rename_for_dirs = true;
 pub const WatchEntry = struct { fd: std.posix.fd_t, is_file: bool };
 
 handler: *Handler,

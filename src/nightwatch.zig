@@ -115,6 +115,8 @@ pub fn Create(comptime variant: Variant) type {
         /// modifications.
         pub const detects_file_modifications = Backend.detects_file_modifications;
         pub const emits_close_events = Backend.emits_close_events;
+        pub const emits_rename_for_files = Backend.emits_rename_for_files;
+        pub const emits_rename_for_dirs = Backend.emits_rename_for_dirs;
 
         /// Create a new watcher.
         ///
