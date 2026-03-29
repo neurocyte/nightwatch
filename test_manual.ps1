@@ -55,6 +55,22 @@ Start-Sleep -Milliseconds 400
 
 Write-Host "[op] rmdir subdir"
 Remove-Item -Path "$TESTDIR\subdir"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] mkdir dirA"
+New-Item -ItemType Directory -Path "$TESTDIR\dirA" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] touch dirA\file3.txt"
+New-Item -ItemType File -Path "$TESTDIR\dirA\file3.txt" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rename dirA -> dirB"
+Rename-Item -Path "$TESTDIR\dirA" -NewName "dirB"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rmdir dirB (and contents)"
+Remove-Item -Recurse -Force -Path "$TESTDIR\dirB"
 Start-Sleep -Milliseconds 500
 
 Write-Host ""
