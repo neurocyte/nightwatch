@@ -550,8 +550,6 @@ fn testMultipleFiles(comptime Watcher: type, allocator: std.mem.Allocator) !void
 }
 
 fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
-    // inotify pairs MOVED_FROM + MOVED_TO into a single rename event; nothing to order.
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
 
     const TH = MakeTestHandler(Watcher);
 
@@ -580,6 +578,10 @@ fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
 
     try std.fs.renameAbsolute(src_path, dst_path);
     try drainEvents(Watcher, &watcher);
+
+    // Backends that deliver a paired rename() callback (INotify, Windows) have
+    // no two-event ordering to verify - the pair is a single atomic event.
+    if (th.hasRename(src_path, dst_path)) return;
 
     const src_idx = th.indexOfAnyPath(src_path) orelse
         return error.MissingSrcEvent;
@@ -628,10 +630,12 @@ fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !v
     }
     try drainEvents(Watcher, &watcher);
 
-    const rename_idx: usize = if (builtin.os.tag == .linux)
-        th.indexOfRename(src_path, dst_path) orelse return error.MissingRenameEvent
-    else
-        th.indexOfAnyPath(src_path) orelse return error.MissingSrcEvent;
+    // Prefer the paired rename event (INotify, Windows); fall back to any
+    // event touching src_path for backends that emit separate events.
+    const rename_idx: usize =
+        th.indexOfRename(src_path, dst_path) orelse
+        th.indexOfAnyPath(src_path) orelse
+        return error.MissingSrcEvent;
 
     const modify_idx = th.indexOfChange(dst_path, .modified, .file) orelse
         return error.MissingModifyEvent;

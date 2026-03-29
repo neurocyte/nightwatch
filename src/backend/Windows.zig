@@ -183,8 +183,19 @@ fn thread_fn(
                     if (info.Action == FILE_ACTION_RENAMED_NEW_NAME) {
                         if (pending_rename) |pr| {
                             const src = pr.path_buf[0..pr.path_len];
-                            // Re-scan renamed directory contents into cache so
-                            // subsequent delete events for children resolve correctly.
+                            // Cache the new path so future delete/rename events can
+                            // resolve its type (OLD_NAME removed it from the cache).
+                            if (pr.object_type != .unknown) cache_new: {
+                                const gop = path_types.getOrPut(allocator, full_path) catch break :cache_new;
+                                if (!gop.found_existing) {
+                                    gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
+                                        _ = path_types.remove(full_path);
+                                        break :cache_new;
+                                    };
+                                }
+                                gop.value_ptr.* = pr.object_type;
+                            }
+                            // For dirs, also scan children into cache.
                             if (pr.object_type == .dir)
                                 scan_path_types_into(allocator, path_types, full_path);
                             const next_entry_offset = info.NextEntryOffset;
