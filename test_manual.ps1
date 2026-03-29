@@ -14,12 +14,14 @@ if (-not (Test-Path $NW)) {
     exit 1
 }
 
-$TESTDIR  = Join-Path $env:TEMP "nightwatch_manual_$PID"
-$TESTDIR2 = Join-Path $env:TEMP "nightwatch_manual2_$PID"
-New-Item -ItemType Directory -Path $TESTDIR  | Out-Null
-New-Item -ItemType Directory -Path $TESTDIR2 | Out-Null
+$TESTDIR   = Join-Path $env:TEMP "nightwatch_manual_$PID"
+$TESTDIR2  = Join-Path $env:TEMP "nightwatch_manual2_$PID"
+$UNWATCHED = Join-Path $env:TEMP "nightwatch_unwatched_$PID"
+New-Item -ItemType Directory -Path $TESTDIR   | Out-Null
+New-Item -ItemType Directory -Path $TESTDIR2  | Out-Null
+New-Item -ItemType Directory -Path $UNWATCHED | Out-Null
 
-Write-Host "--- watching $TESTDIR and $TESTDIR2 ---"
+Write-Host "--- watching $TESTDIR and $TESTDIR2 (unwatched: $UNWATCHED) ---"
 Write-Host "--- starting nightwatch (Ctrl-C to stop early) ---"
 Write-Host ""
 
@@ -105,8 +107,46 @@ Move-Item -Path "$TESTDIR\subA" -Destination "$TESTDIR2\subA2"
 Start-Sleep -Milliseconds 500
 
 Write-Host ""
+Write-Host "# move in/out (one side unwatched)"
+Write-Host ""
+
+Write-Host "[op] touch outfile.txt in dir1"
+New-Item -ItemType File -Path "$TESTDIR\outfile.txt" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] move outfile.txt: dir1 -> unwatched (move out)"
+Move-Item -Path "$TESTDIR\outfile.txt" -Destination "$UNWATCHED\outfile.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] move outfile.txt: unwatched -> dir1 (move in)"
+Move-Item -Path "$UNWATCHED\outfile.txt" -Destination "$TESTDIR\outfile.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] delete outfile.txt"
+Remove-Item -Path "$TESTDIR\outfile.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] mkdir unwatched\subdir with a file"
+New-Item -ItemType Directory -Path "$UNWATCHED\subdir" | Out-Null
+New-Item -ItemType File -Path "$UNWATCHED\subdir\inside.txt" | Out-Null
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] move unwatched\subdir -> dir1\subdir (move subdir in)"
+Move-Item -Path "$UNWATCHED\subdir" -Destination "$TESTDIR\subdir"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] delete dir1\subdir\inside.txt"
+Remove-Item -Path "$TESTDIR\subdir\inside.txt"
+Start-Sleep -Milliseconds 400
+
+Write-Host "[op] rmdir dir1\subdir"
+Remove-Item -Path "$TESTDIR\subdir"
+Start-Sleep -Milliseconds 500
+
+Write-Host ""
 Write-Host "--- done, stopping nightwatch ---"
 Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
 $proc.WaitForExit()
 Remove-Item -Recurse -Force -Path $TESTDIR
 Remove-Item -Recurse -Force -Path $TESTDIR2
+Remove-Item -Recurse -Force -Path $UNWATCHED

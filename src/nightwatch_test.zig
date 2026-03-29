@@ -643,6 +643,146 @@ fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !v
     try std.testing.expect(rename_idx < modify_idx);
 }
 
+fn testMoveOutFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
+
+    const watched = try makeTempDir(allocator);
+    defer {
+        removeTempDir(watched);
+        allocator.free(watched);
+    }
+    const other = try makeTempDir(allocator);
+    defer {
+        removeTempDir(other);
+        allocator.free(other);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(watched);
+
+    const src_path = try std.fs.path.join(allocator, &.{ watched, "moveme.txt" });
+    defer allocator.free(src_path);
+    const dst_path = try std.fs.path.join(allocator, &.{ other, "moveme.txt" });
+    defer allocator.free(dst_path);
+
+    {
+        const f = try std.fs.createFileAbsolute(src_path, .{});
+        f.close();
+    }
+    try drainEvents(Watcher, &watcher);
+
+    try std.fs.renameAbsolute(src_path, dst_path);
+    try drainEvents(Watcher, &watcher);
+
+    // File moved out of the watched tree: appears as deleted (INotify, Windows)
+    // or renamed (kqueue, which holds a vnode fd and sees NOTE_RENAME).
+    const src_gone = th.hasChange(src_path, .deleted, .file) or
+        th.hasChange(src_path, .renamed, .file);
+    try std.testing.expect(src_gone);
+    // No event for the destination - it is in an unwatched directory.
+    try std.testing.expect(!th.hasChange(dst_path, .created, .file));
+}
+
+fn testMoveInFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
+
+    const watched = try makeTempDir(allocator);
+    defer {
+        removeTempDir(watched);
+        allocator.free(watched);
+    }
+    const other = try makeTempDir(allocator);
+    defer {
+        removeTempDir(other);
+        allocator.free(other);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(watched);
+
+    const src_path = try std.fs.path.join(allocator, &.{ other, "moveme.txt" });
+    defer allocator.free(src_path);
+    const dst_path = try std.fs.path.join(allocator, &.{ watched, "moveme.txt" });
+    defer allocator.free(dst_path);
+
+    {
+        const f = try std.fs.createFileAbsolute(src_path, .{});
+        f.close();
+    }
+
+    try std.fs.renameAbsolute(src_path, dst_path);
+    try drainEvents(Watcher, &watcher);
+
+    // File moved into the watched tree: appears as created.
+    try std.testing.expect(th.hasChange(dst_path, .created, .file));
+    // No event for the source - it was in an unwatched directory.
+    try std.testing.expect(!th.hasChange(src_path, .deleted, .file));
+}
+
+fn testMoveInSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
+
+    const watched = try makeTempDir(allocator);
+    defer {
+        removeTempDir(watched);
+        allocator.free(watched);
+    }
+    const other = try makeTempDir(allocator);
+    defer {
+        removeTempDir(other);
+        allocator.free(other);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(watched);
+
+    const src_sub = try std.fs.path.join(allocator, &.{ other, "sub" });
+    defer allocator.free(src_sub);
+    const dst_sub = try std.fs.path.join(allocator, &.{ watched, "sub" });
+    defer allocator.free(dst_sub);
+    const src_file = try std.fs.path.join(allocator, &.{ src_sub, "f.txt" });
+    defer allocator.free(src_file);
+    const dst_file = try std.fs.path.join(allocator, &.{ dst_sub, "f.txt" });
+    defer allocator.free(dst_file);
+
+    // Create subdir with a file in the unwatched root, then move it in.
+    try std.fs.makeDirAbsolute(src_sub);
+    {
+        const f = try std.fs.createFileAbsolute(src_file, .{});
+        f.close();
+    }
+    try std.fs.renameAbsolute(src_sub, dst_sub);
+    try drainEvents(Watcher, &watcher);
+
+    try std.testing.expect(th.hasChange(dst_sub, .created, .dir));
+
+    // Delete the file inside the moved-in subdir.
+    try std.fs.deleteFileAbsolute(dst_file);
+    try drainEvents(Watcher, &watcher);
+
+    // Object type must be .file, not .unknown - backend must have seeded
+    // the path_types cache when the subdir was moved in.
+    try std.testing.expect(th.hasChange(dst_file, .deleted, .file));
+
+    // Delete the now-empty subdir.
+    try std.fs.deleteDirAbsolute(dst_sub);
+    try drainEvents(Watcher, &watcher);
+
+    try std.testing.expect(th.hasChange(dst_sub, .deleted, .dir));
+}
+
 // ---------------------------------------------------------------------------
 // Test blocks - each runs its case across all available variants.
 // ---------------------------------------------------------------------------
@@ -722,5 +862,23 @@ test "rename: old-name event precedes new-name event" {
 test "rename-then-modify: rename event precedes the subsequent modify event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testRenameThenModify(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "moving a file out of the watched tree appears as deleted or renamed" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testMoveOutFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "moving a file into the watched tree appears as created" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testMoveInFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "moving a subdir into the watched tree: contents can be deleted with correct types" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testMoveInSubdir(nw.Create(variant), std.testing.allocator);
     }
 }

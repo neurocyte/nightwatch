@@ -15,7 +15,8 @@ fi
 
 TESTDIR=$(mktemp -d)
 TESTDIR2=$(mktemp -d)
-echo "--- watching $TESTDIR and $TESTDIR2 ---"
+UNWATCHED=$(mktemp -d)
+echo "--- watching $TESTDIR and $TESTDIR2 (unwatched: $UNWATCHED) ---"
 echo "--- starting nightwatch (Ctrl-C to stop early) ---"
 echo ""
 
@@ -102,7 +103,44 @@ mv "$TESTDIR/subA" "$TESTDIR2/subA2"
 sleep 0.5
 
 echo ""
+echo "# move in/out (one side unwatched)"
+echo ""
+
+echo "[op] touch outfile.txt in dir1"
+touch "$TESTDIR/outfile.txt"
+sleep 0.4
+
+echo "[op] move outfile.txt: dir1 -> unwatched (move out)"
+mv "$TESTDIR/outfile.txt" "$UNWATCHED/outfile.txt"
+sleep 0.4
+
+echo "[op] move outfile.txt: unwatched -> dir1 (move in)"
+mv "$UNWATCHED/outfile.txt" "$TESTDIR/outfile.txt"
+sleep 0.4
+
+echo "[op] delete outfile.txt"
+rm "$TESTDIR/outfile.txt"
+sleep 0.4
+
+echo "[op] mkdir unwatched/subdir with a file"
+mkdir "$UNWATCHED/subdir"
+touch "$UNWATCHED/subdir/inside.txt"
+sleep 0.4
+
+echo "[op] move unwatched/subdir -> dir1/subdir (move subdir in)"
+mv "$UNWATCHED/subdir" "$TESTDIR/subdir"
+sleep 0.4
+
+echo "[op] delete dir1/subdir/inside.txt"
+rm "$TESTDIR/subdir/inside.txt"
+sleep 0.4
+
+echo "[op] rmdir dir1/subdir"
+rmdir "$TESTDIR/subdir"
+sleep 0.5
+
+echo ""
 echo "--- done, stopping nightwatch ---"
 kill $NW_PID 2>/dev/null
 wait $NW_PID 2>/dev/null
-rm -rf "$TESTDIR" "$TESTDIR2"
+rm -rf "$TESTDIR" "$TESTDIR2" "$UNWATCHED"
