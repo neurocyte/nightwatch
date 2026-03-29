@@ -18,22 +18,25 @@ pub const EventType = enum {
     ///
     /// Delivery varies by backend:
     ///
-    /// - **INotify**: renames within the watched tree are delivered as a
-    ///   single atomic `rename` callback with both source and destination
-    ///   paths. A move out of the tree appears as `deleted`; a move into
-    ///   the tree appears as `created`.
+    /// - **INotify**: all watches share a single inotify file descriptor, so
+    ///   moves are paired by cookie across all watched roots. Renames between
+    ///   two watched directories - even separate watch roots on the same
+    ///   watcher instance - are delivered as a single atomic `rename`
+    ///   callback. A move out of all watched paths appears as `deleted`; a
+    ///   move in from an unwatched path appears as `created`.
+    ///
+    /// - **Windows**: renames within a single watched root are delivered as a
+    ///   single atomic `rename` callback. However, each root uses an
+    ///   independent `ReadDirectoryChangesW` handle with no shared cookie, so
+    ///   a move between two separately watched roots cannot be paired: it
+    ///   appears as `deleted` on the source side and `created` on the
+    ///   destination side.
     ///
     /// - **kqueue / kqueuedir**: when a watched *directory* is itself
     ///   renamed, a `renamed` change event is emitted for the old directory
     ///   path (the new path is not known). Renames of *files inside* a
     ///   watched directory are detected indirectly via directory-level
-    ///   `NOTE_WRITE` events and appear as a `deleted` event for the old
-    ///   name followed by a `created` event for the new name.
-    ///
-    /// - **Windows**: renames within the watched tree are delivered as a
-    ///   single atomic `rename` callback, matching INotify behaviour. A
-    ///   move out of the tree appears as `deleted`; a move into the tree
-    ///   appears as `created`.
+    ///   `NOTE_WRITE` events and appear as `deleted` + `created`.
     ///
     /// - **FSEvents**: each path involved in a rename receives its own
     ///   `renamed` change event; the two sides are not paired.
@@ -61,9 +64,9 @@ pub const Error = error{
 
 /// Selects how the watcher delivers events to the caller.
 ///
-/// - `.threaded` — the backend spawns an internal thread that calls the
+/// - `.threaded` - the backend spawns an internal thread that calls the
 ///   handler directly. The caller just needs to keep the `Watcher` alive.
-/// - `.polling` — no internal thread is created. The caller must poll
+/// - `.polling` - no internal thread is created. The caller must poll
 ///   `poll_fd()` for readability and call `handle_read_ready()` whenever
 ///   data is available. Currently only supported on Linux (inotify).
 pub const InterfaceType = enum { polling, threaded };

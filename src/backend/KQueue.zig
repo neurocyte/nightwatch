@@ -189,7 +189,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
-    // Arena for all temporaries — freed in one shot at the end.
+    // Arena for all temporaries - freed in one shot at the end.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const tmp = arena.allocator();

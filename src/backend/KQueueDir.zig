@@ -173,7 +173,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
-    // Arena for all temporaries — freed in one shot at the end.
+    // Arena for all temporaries - freed in one shot at the end.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const tmp = arena.allocator();
@@ -242,13 +242,13 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         var cit = current_files.iterator();
         while (cit.next()) |entry| {
             if (snapshot.getPtr(entry.key_ptr.*)) |stored_mtime| {
-                // File exists in both — check for modification via mtime change.
+                // File exists in both - check for modification via mtime change.
                 if (stored_mtime.* != entry.value_ptr.*) {
                     stored_mtime.* = entry.value_ptr.*;
                     try to_modify.append(tmp, entry.key_ptr.*); // from current_files (tmp)
                 }
             } else {
-                // New file — add to snapshot and to_create list.
+                // New file - add to snapshot and to_create list.
                 const owned = allocator.dupe(u8, entry.key_ptr.*) catch |e| {
                     return e;
                 };
