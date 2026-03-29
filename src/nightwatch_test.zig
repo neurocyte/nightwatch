@@ -300,6 +300,35 @@ fn testCreateSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void 
     try std.testing.expect(th.hasChange(dir_path, .created, .dir));
 }
 
+fn testDeleteSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
+
+    const tmp = try makeTempDir(allocator);
+    defer {
+        removeTempDir(tmp);
+        allocator.free(tmp);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    const dir_path = try std.fs.path.join(allocator, &.{ tmp, "subdir" });
+    defer allocator.free(dir_path);
+    try std.fs.makeDirAbsolute(dir_path);
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(tmp);
+
+    try drainEvents(Watcher, &watcher);
+
+    try std.fs.deleteDirAbsolute(dir_path);
+    try drainEvents(Watcher, &watcher);
+
+    try std.testing.expect(th.hasChange(dir_path, .deleted, .dir));
+}
+
+
 fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
@@ -552,6 +581,12 @@ test "writing to a file emits a 'modified' event" {
 test "deleting a file emits a 'deleted' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testDeleteFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "deleting a dir emits a 'deleted' event" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testDeleteSubdir(nw.Create(variant), std.testing.allocator);
     }
 }
 
