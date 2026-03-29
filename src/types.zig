@@ -30,8 +30,13 @@ pub const EventType = enum {
     ///   `NOTE_WRITE` events and appear as a `deleted` event for the old
     ///   name followed by a `created` event for the new name.
     ///
-    /// - **FSEvents / Windows**: each path involved in a rename receives
-    ///   its own `renamed` change event; the two sides are not paired.
+    /// - **Windows**: renames within the watched tree are delivered as a
+    ///   single atomic `rename` callback, matching INotify behaviour. A
+    ///   move out of the tree appears as `deleted`; a move into the tree
+    ///   appears as `created`.
+    ///
+    /// - **FSEvents**: each path involved in a rename receives its own
+    ///   `renamed` change event; the two sides are not paired.
     renamed,
 };
 

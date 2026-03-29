@@ -141,6 +141,14 @@ fn thread_fn(
             if (w.handle != triggered_handle) continue;
             if (bytes > 0) {
                 var offset: usize = 0;
+                // FILE_ACTION_RENAMED_OLD_NAME is always immediately followed by
+                // FILE_ACTION_RENAMED_NEW_NAME in the same RDCW buffer. Stash the
+                // src path here and emit a single handler.rename(src, dst) on NEW.
+                var pending_rename: ?struct {
+                    path_buf: [std.fs.max_path_bytes]u8,
+                    path_len: usize,
+                    object_type: ObjectType,
+                } = null;
                 while (offset < bytes) {
                     const info: *FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(w.buf[offset..].ptr));
                     const name_wchars = (&info.FileName).ptr[0 .. info.FileNameLength / 2];
@@ -150,29 +158,67 @@ fn thread_fn(
                         offset += info.NextEntryOffset;
                         continue;
                     };
-                    const event_type: EventType = switch (info.Action) {
-                        FILE_ACTION_ADDED => .created,
-                        FILE_ACTION_REMOVED => .deleted,
-                        FILE_ACTION_MODIFIED => .modified,
-                        FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME => .renamed,
-                        else => {
-                            if (info.NextEntryOffset == 0) break;
-                            offset += info.NextEntryOffset;
-                            continue;
-                        },
-                    };
                     var full_buf: [std.fs.max_path_bytes]u8 = undefined;
                     const full_path = std.fmt.bufPrint(&full_buf, "{s}\\{s}", .{ w.path, name_buf[0..name_len] }) catch {
                         if (info.NextEntryOffset == 0) break;
                         offset += info.NextEntryOffset;
                         continue;
                     };
+                    if (info.Action == FILE_ACTION_RENAMED_OLD_NAME) {
+                        // Path is gone; resolve type from cache before it is evicted.
+                        const cached = path_types.fetchRemove(full_path);
+                        const ot: ObjectType = if (cached) |kv| blk: {
+                            allocator.free(kv.key);
+                            break :blk kv.value;
+                        } else .unknown;
+                        var pr: @TypeOf(pending_rename.?) = undefined;
+                        @memcpy(pr.path_buf[0..full_path.len], full_path);
+                        pr.path_len = full_path.len;
+                        pr.object_type = ot;
+                        pending_rename = pr;
+                        if (info.NextEntryOffset == 0) break;
+                        offset += info.NextEntryOffset;
+                        continue;
+                    }
+                    if (info.Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                        if (pending_rename) |pr| {
+                            const src = pr.path_buf[0..pr.path_len];
+                            // Re-scan renamed directory contents into cache so
+                            // subsequent delete events for children resolve correctly.
+                            if (pr.object_type == .dir)
+                                scan_path_types_into(allocator, path_types, full_path);
+                            const next_entry_offset = info.NextEntryOffset;
+                            watches_mutex.unlock();
+                            handler.rename(src, full_path, pr.object_type) catch |e| {
+                                std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                                watches_mutex.lock();
+                                pending_rename = null;
+                                break;
+                            };
+                            watches_mutex.lock();
+                            pending_rename = null;
+                            if (next_entry_offset == 0) break;
+                            offset += next_entry_offset;
+                            continue;
+                        }
+                        // Unpaired NEW_NAME: path moved into the watched tree from
+                        // outside. Fall through as .created, matching INotify.
+                    }
+                    const event_type: EventType = switch (info.Action) {
+                        FILE_ACTION_ADDED => .created,
+                        FILE_ACTION_REMOVED => .deleted,
+                        FILE_ACTION_MODIFIED => .modified,
+                        FILE_ACTION_RENAMED_NEW_NAME => .created, // unpaired: moved in from outside
+                        else => {
+                            if (info.NextEntryOffset == 0) break;
+                            offset += info.NextEntryOffset;
+                            continue;
+                        },
+                    };
                     // Determine object_type: try GetFileAttributesW; cache result.
-                    // For deleted paths and the old name in a rename, the path no
-                    // longer exists at event time so GetFileAttributesW would fail;
-                    // use the cached type instead.
-                    const object_type: ObjectType = if (event_type == .deleted or
-                        info.Action == FILE_ACTION_RENAMED_OLD_NAME) blk: {
+                    // For deleted paths the path no longer exists at event time so
+                    // GetFileAttributesW would fail; use the cached type instead.
+                    const object_type: ObjectType = if (event_type == .deleted) blk: {
                         const cached = path_types.fetchRemove(full_path);
                         break :blk if (cached) |kv| blk2: {
                             allocator.free(kv.key);
@@ -186,7 +232,6 @@ fn thread_fn(
                         const INVALID: windows.DWORD = 0xFFFFFFFF;
                         const FILE_ATTRIBUTE_DIRECTORY: windows.DWORD = 0x10;
                         const ot: ObjectType = if (attrs == INVALID) .unknown else if (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) .dir else .file;
-                        // Cache the determined type.
                         if (ot != .unknown) {
                             const gop = path_types.getOrPut(allocator, full_path) catch break :blk ot;
                             if (!gop.found_existing) {
@@ -197,10 +242,6 @@ fn thread_fn(
                             }
                             gop.value_ptr.* = ot;
                         }
-                        // When a directory is renamed, scan its children so that
-                        // subsequent delete events for contents can resolve their type.
-                        if (ot == .dir and info.Action == FILE_ACTION_RENAMED_NEW_NAME)
-                            scan_path_types_into(allocator, path_types, full_path);
                         break :blk ot;
                     };
                     // Suppress FILE_ACTION_MODIFIED on directories: these are
@@ -224,6 +265,14 @@ fn thread_fn(
                     watches_mutex.lock();
                     if (next_entry_offset == 0) break;
                     offset += next_entry_offset;
+                }
+                // Flush an unpaired OLD_NAME: path moved out of the watched tree.
+                // Emit as .deleted, matching INotify behaviour.
+                if (pending_rename) |pr| {
+                    const src = pr.path_buf[0..pr.path_len];
+                    watches_mutex.unlock();
+                    handler.change(src, .deleted, pr.object_type) catch {};
+                    watches_mutex.lock();
                 }
             }
             // Re-arm ReadDirectoryChangesW for the next batch.
