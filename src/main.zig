@@ -50,12 +50,14 @@ const CliHandler = struct {
         const color: std.io.tty.Color = switch (event_type) {
             .created => .green,
             .modified => .blue,
+            .closed => .bright_black,
             .deleted => .red,
             .renamed => .magenta,
         };
         const event_label = switch (event_type) {
             .created => "create ",
             .modified => "modify ",
+            .closed => "close  ",
             .deleted => "delete ",
             .renamed => "rename ",
         };
@@ -160,6 +162,7 @@ fn usage(out: std.fs.File) !void {
         \\Events printed to stdout (columns: event  type  path):
         \\  create    a file or directory was created
         \\  modify    a file was modified
+        \\  close     a file was closed after writing (Linux only)
         \\  delete    a file or directory was deleted
         \\  rename    a file or directory was renamed
         \\

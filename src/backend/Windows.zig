@@ -6,6 +6,7 @@ const ObjectType = types.ObjectType;
 
 pub const watches_recursively = true; // ReadDirectoryChangesW with bWatchSubtree=1
 pub const detects_file_modifications = true;
+pub const emits_close_events = false;
 
 const windows = std.os.windows;
 

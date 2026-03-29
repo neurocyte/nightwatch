@@ -114,6 +114,7 @@ pub fn Create(comptime variant: Variant) type {
         /// `watch()` do receive per-file `NOTE_WRITE` events and will report
         /// modifications.
         pub const detects_file_modifications = Backend.detects_file_modifications;
+        pub const emits_close_events = Backend.emits_close_events;
 
         /// Create a new watcher.
         ///

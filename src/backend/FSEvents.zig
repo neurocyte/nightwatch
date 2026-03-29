@@ -6,6 +6,7 @@ const ObjectType = types.ObjectType;
 
 pub const watches_recursively = true; // FSEventStreamCreate watches the entire subtree
 pub const detects_file_modifications = true;
+pub const emits_close_events = false;
 
 handler: *Handler,
 stream: ?*anyopaque, // FSEventStreamRef

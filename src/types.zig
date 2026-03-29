@@ -7,6 +7,11 @@ pub const EventType = enum {
     created,
     /// A file's contents were modified.
     modified,
+    /// A file was closed.
+    ///
+    /// Only delivered by INotfiy (Linux) and only if the file was opened
+    /// for writing.
+    closed,
     /// A file or directory was deleted.
     deleted,
     /// A file or directory was renamed or moved.

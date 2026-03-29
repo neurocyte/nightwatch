@@ -245,6 +245,42 @@ fn testModifyFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.testing.expect(th.hasChange(file_path, .modified, .file));
 }
 
+fn testCloseFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+    if (comptime !Watcher.emits_close_events) return error.SkipZigTest;
+
+    const TH = MakeTestHandler(Watcher);
+
+    const tmp = try makeTempDir(allocator);
+    defer {
+        removeTempDir(tmp);
+        allocator.free(tmp);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    const file_path = try std.fs.path.join(allocator, &.{ tmp, "data.txt" });
+    defer allocator.free(file_path);
+    {
+        const f = try std.fs.createFileAbsolute(file_path, .{});
+        f.close();
+    }
+
+    var watcher = try Watcher.init(allocator, &th.handler);
+    defer watcher.deinit();
+    try watcher.watch(tmp);
+
+    {
+        const f = try std.fs.openFileAbsolute(file_path, .{ .mode = .write_only });
+        defer f.close();
+        try f.writeAll("hello nightwatch\n");
+    }
+
+    try drainEvents(Watcher, &watcher);
+    try std.testing.expect(th.hasChange(file_path, .modified, .file));
+    try std.testing.expect(th.hasChange(file_path, .closed, .file));
+}
+
 fn testDeleteFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
@@ -575,6 +611,12 @@ test "creating a file emits a 'created' event" {
 test "writing to a file emits a 'modified' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testModifyFile(nw.Create(variant), std.testing.allocator);
+    }
+}
+
+test "closing a file after writing emits a 'closed' event (inotify only)" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testCloseFile(nw.Create(variant), std.testing.allocator);
     }
 }
 

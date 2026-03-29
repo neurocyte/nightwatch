@@ -35,6 +35,7 @@ pub fn Create(comptime variant: InterfaceType) type {
 
         pub const watches_recursively = false;
         pub const detects_file_modifications = true;
+        pub const emits_close_events = true;
         pub const polling = variant == .polling;
 
         const WatchEntry = struct { path: []u8, is_dir: bool };
@@ -342,8 +343,10 @@ pub fn Create(comptime variant: InterfaceType) type {
                             if (is_dir and self.has_watch_for_path(full_path))
                                 continue;
                             break :blk .deleted;
-                        } else if (ev.mask & (IN.MODIFY | IN.CLOSE_WRITE) != 0)
+                        } else if (ev.mask & IN.MODIFY != 0)
                             .modified
+                        else if (ev.mask & IN.CLOSE_WRITE != 0)
+                            .closed
                         else
                             continue;
                         try self.handler.change(full_path, event_type, object_type);
