@@ -38,8 +38,11 @@ pub const EventType = enum {
     ///   watched directory are detected indirectly via directory-level
     ///   `NOTE_WRITE` events and appear as `deleted` + `created`.
     ///
-    /// - **FSEvents**: each path involved in a rename receives its own
-    ///   `renamed` change event; the two sides are not paired.
+    /// - **FSEvents**: renames are normalized to `deleted` (old path) and
+    ///   `created` (new path) via an existence check at event time. The two
+    ///   sides are not paired. Move-in and move-out therefore appear as
+    ///   `created` and `deleted` respectively, consistent with all other
+    ///   backends.
     renamed,
 };
 

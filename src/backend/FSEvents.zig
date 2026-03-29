@@ -7,8 +7,9 @@ const ObjectType = types.ObjectType;
 pub const watches_recursively = true; // FSEventStreamCreate watches the entire subtree
 pub const detects_file_modifications = true;
 pub const emits_close_events = false;
-pub const emits_rename_for_files = true;
-pub const emits_rename_for_dirs = true;
+pub const emits_rename_for_files = false;
+pub const emits_rename_for_dirs = false;
+pub const emits_subtree_created_on_movein = false; // FSEvents emits per-path events only; no subtree synthesis
 
 handler: *Handler,
 stream: ?*anyopaque, // FSEventStreamRef
@@ -235,7 +236,11 @@ fn callback(
             ctx.handler.change(path, .deleted, ot) catch {};
         }
         if (flags & kFSEventStreamEventFlagItemRenamed != 0) {
-            ctx.handler.change(path, .renamed, ot) catch {};
+            // FSEvents fires ItemRenamed for both sides of a rename unpaired.
+            // Normalize to created/deleted based on whether the path still exists,
+            // so move-in appears as created and move-out as deleted on all platforms.
+            const exists = if (std.fs.accessAbsolute(path, .{})) |_| true else |_| false;
+            ctx.handler.change(path, if (exists) .created else .deleted, ot) catch {};
         }
         if (flags & kFSEventStreamEventFlagItemModified != 0) {
             ctx.handler.change(path, .modified, ot) catch {};

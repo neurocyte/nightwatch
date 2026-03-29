@@ -38,6 +38,7 @@ pub fn Create(comptime variant: InterfaceType) type {
         pub const emits_close_events = true;
         pub const emits_rename_for_files = true;
         pub const emits_rename_for_dirs = true;
+        pub const emits_subtree_created_on_movein = true;
         pub const polling = variant == .polling;
 
         const WatchEntry = struct { path: []u8, is_dir: bool };
@@ -211,6 +212,26 @@ pub fn Create(comptime variant: InterfaceType) type {
             }
         }
 
+        // Walk dir_path recursively, emitting a 'created' event for every file and
+        // subdirectory.  Called after an unpaired IN_MOVED_TO for a directory so that
+        // the caller sees individual 'created' events for the moved-in tree contents.
+        fn emit_subtree_created(self: *@This(), dir_path: []const u8) error{HandlerFailed}!void {
+            var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (iter.next() catch return) |entry| {
+                const ot: ObjectType = switch (entry.kind) {
+                    .file => .file,
+                    .directory => .dir,
+                    else => continue,
+                };
+                var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+                try self.handler.change(full_path, EventType.created, ot);
+                if (ot == .dir) try self.emit_subtree_created(full_path);
+            }
+        }
+
         pub fn handle_read_ready(self: *@This(), allocator: std.mem.Allocator) (std.posix.ReadError || error{ NoSpaceLeft, OutOfMemory, HandlerFailed })!void {
             const InotifyEvent = extern struct {
                 wd: i32,
@@ -312,6 +333,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                             // No paired MOVED_FROM, file was moved in from outside the watched tree.
                             const ot: ObjectType = if (ev.mask & IN.ISDIR != 0) .dir else .file;
                             try self.handler.change(full_path, EventType.created, ot);
+                            if (ot == .dir) try self.emit_subtree_created(full_path);
                         }
                     } else if (ev.mask & IN.MOVE_SELF != 0) {
                         // Suppress if the rename was already delivered as a paired

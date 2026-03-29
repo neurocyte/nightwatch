@@ -9,6 +9,7 @@ pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = true;
 pub const emits_rename_for_dirs = true;
+pub const emits_subtree_created_on_movein = true;
 
 const windows = std.os.windows;
 
@@ -279,6 +280,13 @@ fn thread_fn(
                         watches_mutex.lock();
                         break;
                     };
+                    if (event_type == .created and object_type == .dir) {
+                        emit_subtree_created(handler, full_path) catch |e| {
+                            std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                            watches_mutex.lock();
+                            break;
+                        };
+                    }
                     watches_mutex.lock();
                     if (next_entry_offset == 0) break;
                     offset += next_entry_offset;
@@ -341,6 +349,27 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
 // Called from add_watch and from thread_fn on directory renames so that
 // FILE_ACTION_REMOVED events for children of a renamed directory can
 // resolve their ObjectType from cache.
+// Walk dir_path recursively, emitting 'created' events for all contents.
+// Called after a directory is created or moved into the watched tree so callers
+// see individual 'created' events for all pre-existing contents.
+// Must be called with watches_mutex NOT held (handler calls are outside the lock).
+fn emit_subtree_created(handler: *Handler, dir_path: []const u8) error{HandlerFailed}!void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const ot: ObjectType = switch (entry.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => continue,
+        };
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ dir_path, entry.name }) catch continue;
+        try handler.change(full_path, EventType.created, ot);
+        if (ot == .dir) try emit_subtree_created(handler, full_path);
+    }
+}
+
 fn scan_path_types(self: *@This(), allocator: std.mem.Allocator, root: []const u8) void {
     scan_path_types_into(allocator, &self.path_types, root);
 }

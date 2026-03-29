@@ -9,6 +9,7 @@ pub const detects_file_modifications = false;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
 pub const emits_rename_for_dirs = true;
+pub const emits_subtree_created_on_movein = true;
 pub const WatchEntry = struct { fd: std.posix.fd_t, is_file: bool };
 
 handler: *Handler,
@@ -276,8 +277,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
 
     // Emit all events outside the lock so handlers may safely call watch()/unwatch().
     // Order: new dirs, deletions (source before dest for renames), creations, modifications.
-    for (new_dirs.items) |full_path|
+    for (new_dirs.items) |full_path| {
         try self.handler.change(full_path, EventType.created, .dir);
+        try self.emit_subtree_created(full_path);
+    }
     for (to_delete.items) |name| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
@@ -294,6 +297,26 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         try self.handler.change(full_path, EventType.modified, .file);
     }
     // arena.deinit() frees current_files, current_dirs, new_dirs, and list metadata
+}
+
+// Walk dir_path recursively, emitting 'created' events for all contents.
+// Called after a new dir appears in scan_dir so callers see individual
+// 'created' events for the pre-existing tree of a moved-in directory.
+fn emit_subtree_created(self: *@This(), dir_path: []const u8) error{HandlerFailed}!void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const ot: ObjectType = switch (entry.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => continue,
+        };
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        try self.handler.change(full_path, EventType.created, ot);
+        if (ot == .dir) try self.emit_subtree_created(full_path);
+    }
 }
 
 pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory }!void {

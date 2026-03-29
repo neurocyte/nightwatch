@@ -9,6 +9,7 @@ pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
 pub const emits_rename_for_dirs = true;
+pub const emits_subtree_created_on_movein = true;
 
 handler: *Handler,
 kq: std.posix.fd_t,
@@ -282,8 +283,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     // Emit all events outside the lock so handlers may safely call watch()/unwatch().
     // Emit created dirs, then deletions, then creations. Deletions first ensures that
     // a rename (old disappears, new appears) reports the source path before the dest.
-    for (new_dirs.items) |full_path|
+    for (new_dirs.items) |full_path| {
         try self.handler.change(full_path, EventType.created, .dir);
+        try self.emit_subtree_created(allocator, full_path);
+    }
     for (to_delete.items) |name| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
@@ -297,6 +300,31 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         try self.handler.change(full_path, EventType.created, .file);
     }
     // arena.deinit() frees current_files, current_dirs, new_dirs, and list metadata
+}
+
+// Walk dir_path recursively, emitting 'created' events and registering per-file
+// vnode watches for modification tracking.  Called after a new dir appears in
+// scan_dir (e.g. a directory moved into the watched tree) so callers see
+// individual 'created' events for all pre-existing contents.
+fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const ot: ObjectType = switch (entry.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => continue,
+        };
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        try self.handler.change(full_path, EventType.created, ot);
+        if (ot == .file) {
+            self.register_file_watch(allocator, full_path);
+        } else {
+            try self.emit_subtree_created(allocator, full_path);
+        }
+    }
 }
 
 fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {

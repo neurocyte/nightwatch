@@ -678,11 +678,8 @@ fn testMoveOutFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.fs.renameAbsolute(src_path, dst_path);
     try drainEvents(Watcher, &watcher);
 
-    // File moved out of the watched tree: appears as deleted (INotify, Windows)
-    // or renamed (kqueue, which holds a vnode fd and sees NOTE_RENAME).
-    const src_gone = th.hasChange(src_path, .deleted, .file) or
-        th.hasChange(src_path, .renamed, .file);
-    try std.testing.expect(src_gone);
+    // File moved out of the watched tree: appears as deleted on all platforms.
+    try std.testing.expect(th.hasChange(src_path, .deleted, .file));
     // No event for the destination - it is in an unwatched directory.
     try std.testing.expect(!th.hasChange(dst_path, .created, .file));
 }
@@ -767,6 +764,8 @@ fn testMoveInSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void 
     try drainEvents(Watcher, &watcher);
 
     try std.testing.expect(th.hasChange(dst_sub, .created, .dir));
+    if (comptime Watcher.emits_subtree_created_on_movein)
+        try std.testing.expect(th.hasChange(dst_file, .created, .file));
 
     // Delete the file inside the moved-in subdir.
     try std.fs.deleteFileAbsolute(dst_file);
