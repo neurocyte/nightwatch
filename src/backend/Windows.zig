@@ -203,6 +203,14 @@ fn thread_fn(
                             scan_path_types_into(allocator, path_types, full_path);
                         break :blk ot;
                     };
+                    // Suppress FILE_ACTION_MODIFIED on directories: these are
+                    // parent-directory mtime side-effects of child operations
+                    // (delete, rename) and are not emitted by any other backend.
+                    if (event_type == .modified and object_type == .dir) {
+                        if (info.NextEntryOffset == 0) break;
+                        offset += info.NextEntryOffset;
+                        continue;
+                    }
                     // Capture next_entry_offset before releasing the mutex: after unlock,
                     // the main thread may call remove_watch() which frees w.buf, making
                     // the `info` pointer (which points into w.buf) a dangling reference.
