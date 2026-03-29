@@ -172,6 +172,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                     std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
                     return;
                 };
+                self.remove_watch(allocator, dir_path);
             } else if (ev.fflags & NOTE_WRITE != 0) {
                 self.scan_dir(allocator, dir_path) catch |e|
                     std.log.err("nightwatch: scan_dir failed: {s}", .{@errorName(e)});
