@@ -253,6 +253,12 @@ fn thread_fn(
                             }
                             gop.value_ptr.* = ot;
                         }
+                        // A directory that appears via move-in carries existing children
+                        // that will never generate FILE_ACTION_ADDED events. Scan its
+                        // contents into the cache so subsequent deletes resolve their
+                        // type. Scanning a genuinely new (empty) directory is a no-op.
+                        if (ot == .dir and event_type == .created)
+                            scan_path_types_into(allocator, path_types, full_path);
                         break :blk ot;
                     };
                     // Suppress FILE_ACTION_MODIFIED on directories: these are
