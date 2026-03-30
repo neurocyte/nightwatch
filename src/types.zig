@@ -12,38 +12,12 @@ pub const EventType = enum {
     /// Only delivered by INotfiy (Linux) and only if the file was opened
     /// for writing.
     closed,
-    /// A file or directory was deleted.
+    /// A file or directory was deleted or moved out of a watched tree.
+    ///
+    /// Also emitted for the old path when a file or directory is renamed,
+    /// on all backends except INotify and Windows which can pair the old
+    /// and new paths into a single atomic `rename` callback instead.
     deleted,
-    /// A file or directory was renamed or moved.
-    ///
-    /// Delivery varies by backend:
-    ///
-    /// - **INotify**: all watches share a single inotify file descriptor, so
-    ///   moves are paired by cookie across all watched roots. Renames between
-    ///   two watched directories - even separate watch roots on the same
-    ///   watcher instance - are delivered as a single atomic `rename`
-    ///   callback. A move out of all watched paths appears as `deleted`; a
-    ///   move in from an unwatched path appears as `created`.
-    ///
-    /// - **Windows**: renames within a single watched root are delivered as a
-    ///   single atomic `rename` callback. However, each root uses an
-    ///   independent `ReadDirectoryChangesW` handle with no shared cookie, so
-    ///   a move between two separately watched roots cannot be paired: it
-    ///   appears as `deleted` on the source side and `created` on the
-    ///   destination side.
-    ///
-    /// - **kqueue / kqueuedir**: when a watched *directory* is itself
-    ///   renamed, a `renamed` change event is emitted for the old directory
-    ///   path (the new path is not known). Renames of *files inside* a
-    ///   watched directory are detected indirectly via directory-level
-    ///   `NOTE_WRITE` events and appear as `deleted` + `created`.
-    ///
-    /// - **FSEvents**: renames are normalized to `deleted` (old path) and
-    ///   `created` (new path) via an existence check at event time. The two
-    ///   sides are not paired. Move-in and move-out therefore appear as
-    ///   `created` and `deleted` respectively, consistent with all other
-    ///   backends.
-    renamed,
 };
 
 /// Whether the affected filesystem object is a file, directory, or unknown.

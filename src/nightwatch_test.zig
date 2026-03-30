@@ -400,21 +400,16 @@ fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try drainEvents(Watcher, &watcher);
 
     if (comptime Watcher.emits_rename_for_files) {
-        // INotify delivers a paired atomic rename callback; FSEvents/Windows
-        // deliver individual .renamed change events per path.
-        const has_rename = th.hasRename(src_path, dst_path) or
-            th.hasChange(src_path, .renamed, .file);
-        try std.testing.expect(has_rename);
+        // INotify/Windows: paired atomic rename callback.
+        try std.testing.expect(th.hasRename(src_path, dst_path));
     } else {
-        // KQueue/KQueueDir: file rename appears as delete + create.
+        // kqueue/FSEvents: file rename appears as deleted + created.
         try std.testing.expect(th.hasChange(src_path, .deleted, .file));
         try std.testing.expect(th.hasChange(dst_path, .created, .file));
     }
 }
 
 fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
-    if (comptime !Watcher.emits_rename_for_dirs) return error.SkipZigTest;
-
     const TH = MakeTestHandler(Watcher);
 
     const tmp = try makeTempDir(allocator);
@@ -440,13 +435,13 @@ fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.fs.renameAbsolute(src_path, dst_path);
     try drainEvents(Watcher, &watcher);
 
-    // All backends with emits_rename_for_dirs=true deliver at least a rename
-    // event for the source path. INotify delivers a paired rename callback;
-    // KQueue/KQueueDir deliver change(.renamed, .dir) for the old path only;
-    // FSEvents/Windows deliver change(.renamed, .dir) for both paths.
-    const has_rename = th.hasRename(src_path, dst_path) or
-        th.hasChange(src_path, .renamed, .dir);
-    try std.testing.expect(has_rename);
+    if (comptime Watcher.emits_rename_for_dirs) {
+        // INotify/Windows: paired rename callback.
+        try std.testing.expect(th.hasRename(src_path, dst_path));
+    } else {
+        // kqueue/FSEvents: old path appears as deleted.
+        try std.testing.expect(th.hasChange(src_path, .deleted, .dir));
+    }
 }
 
 fn testUnwatchedDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
@@ -590,8 +585,7 @@ fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
 
     const src_idx = th.indexOfAnyPath(src_path) orelse
         return error.MissingSrcEvent;
-    const dst_idx = th.indexOfChange(dst_path, .renamed, .file) orelse
-        th.indexOfChange(dst_path, .created, .file) orelse
+    const dst_idx = th.indexOfChange(dst_path, .created, .file) orelse
         return error.MissingDstEvent;
 
     try std.testing.expect(src_idx < dst_idx);
@@ -835,7 +829,7 @@ test "renaming a file is reported correctly per-platform" {
     }
 }
 
-test "renaming a directory emits a rename event" {
+test "renaming a directory emits a deleted event for the old path" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testRenameDir(nw.Create(variant), std.testing.allocator);
     }

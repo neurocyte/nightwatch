@@ -52,14 +52,12 @@ const CliHandler = struct {
             .modified => .blue,
             .closed => .bright_black,
             .deleted => .red,
-            .renamed => .magenta,
         };
         const event_label = switch (event_type) {
             .created => "create ",
             .modified => "modify ",
             .closed => "close  ",
             .deleted => "delete ",
-            .renamed => "rename ",
         };
         self.tty.setColor(&w.interface, color) catch return error.HandlerFailed;
         w.interface.writeAll(event_label) catch return error.HandlerFailed;
@@ -163,8 +161,8 @@ fn usage(out: std.fs.File) !void {
         \\  create    a file or directory was created
         \\  modify    a file was modified
         \\  close     a file was closed after writing (Linux only)
-        \\  delete    a file or directory was deleted
-        \\  rename    a file or directory was renamed
+        \\  delete    a file or directory was deleted or moved out
+        \\  rename    a file or directory was renamed (Linux/Windows only, src -> dst)
         \\
         \\Type column: file, dir, or ? (unknown)
         \\

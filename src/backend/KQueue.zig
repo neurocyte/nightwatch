@@ -8,7 +8,7 @@ pub const watches_recursively = false;
 pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
-pub const emits_rename_for_dirs = true;
+pub const emits_rename_for_dirs = false;
 pub const emits_subtree_created_on_movein = true;
 
 handler: *Handler,
@@ -175,7 +175,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                 // skipped by scan_dir's snapshots.contains() check.
                 self.remove_watch(allocator, dir_path);
             } else if (ev.fflags & NOTE_RENAME != 0) {
-                self.handler.change(dir_path, EventType.renamed, .dir) catch |e| {
+                self.handler.change(dir_path, EventType.deleted, .dir) catch |e| {
                     std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
                     return;
                 };
