@@ -171,6 +171,9 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                     std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
                     return;
                 };
+                // Clean up snapshot so that a new dir at the same path is not
+                // skipped by scan_dir's snapshots.contains() check.
+                self.remove_watch(allocator, dir_path);
             } else if (ev.fflags & NOTE_RENAME != 0) {
                 self.handler.change(dir_path, EventType.renamed, .dir) catch |e| {
                     std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
@@ -285,6 +288,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     // a rename (old disappears, new appears) reports the source path before the dest.
     for (new_dirs.items) |full_path| {
         try self.handler.change(full_path, EventType.created, .dir);
+        // Start watching the moved-in dir so future changes inside it are detected
+        // and so its deletion fires NOTE_DELETE rather than being silently missed.
+        self.add_watch(allocator, full_path) catch |e|
+            std.log.err("nightwatch: add_watch on moved-in dir failed: {s}", .{@errorName(e)});
         try self.emit_subtree_created(allocator, full_path);
     }
     for (to_delete.items) |name| {
@@ -322,6 +329,9 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
         if (ot == .file) {
             self.register_file_watch(allocator, full_path);
         } else {
+            // Watch nested subdirs so changes inside them are detected after move-in.
+            self.add_watch(allocator, full_path) catch |e|
+                std.log.err("nightwatch: add_watch on moved-in subdir failed: {s}", .{@errorName(e)});
             try self.emit_subtree_created(allocator, full_path);
         }
     }
