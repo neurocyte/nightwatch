@@ -234,6 +234,11 @@ fn testModifyFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     var watcher = try Watcher.init(allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
+    // Drain before writing: FSEvents may deliver a coalesced create+modify if the
+    // file was created just before the stream started. A drain here separates any
+    // stale creation event from the upcoming write, so the write arrives in its
+    // own callback with only ItemModified set.
+    try drainEvents(Watcher, &watcher);
 
     {
         const f = try std.fs.openFileAbsolute(file_path, .{ .mode = .write_only });
@@ -794,7 +799,9 @@ test "creating a file emits a 'created' event" {
 
 test "writing to a file emits a 'modified' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testModifyFile(nw.Create(variant), std.testing.allocator);
+        testModifyFile(nw.Create(variant), std.testing.allocator) catch |e| {
+            if (e != error.SkipZigTest) return e;
+        };
     }
 }
 
@@ -860,7 +867,9 @@ test "rename: old-name event precedes new-name event" {
 
 test "rename-then-modify: rename event precedes the subsequent modify event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testRenameThenModify(nw.Create(variant), std.testing.allocator);
+        testRenameThenModify(nw.Create(variant), std.testing.allocator) catch |e| {
+            if (e != error.SkipZigTest) return e;
+        };
     }
 }
 

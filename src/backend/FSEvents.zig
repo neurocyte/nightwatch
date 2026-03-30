@@ -229,21 +229,36 @@ fn callback(
         // an error back to the caller.  Stopping the stream from inside the
         // callback would require a separate signal channel and is not worth
         // the complexity; the stream will keep delivering future events.
-        if (flags & kFSEventStreamEventFlagItemCreated != 0) {
-            ctx.handler.change(path, .created, ot) catch {};
-        }
+        // FSEvents coalesces multiple operations into a single callback with
+        // multiple flags set.  Processing all flags independently produces
+        // spurious duplicate events (e.g. ItemRemoved|ItemRenamed -> two
+        // deletes; ItemCreated|ItemRemoved -> spurious create before delete).
+        //
+        // Priority chain: Removed > Renamed > Modified > Created.
+        // Modified beats Created because FSEvents sets ItemCreated on writes to
+        // existing files when O_CREAT is used (e.g. `echo > file`), producing
+        // spurious create events.  When both are set, the file already exists,
+        // so Modified is the accurate description.
+        //
+        // Exception: ItemRenamed|ItemModified on an existing path emits both
+        // created and modified, because a rename-in followed by a write can be
+        // coalesced by FSEvents into a single callback.
         if (flags & kFSEventStreamEventFlagItemRemoved != 0) {
             ctx.handler.change(path, .deleted, ot) catch {};
-        }
-        if (flags & kFSEventStreamEventFlagItemRenamed != 0) {
+        } else if (flags & kFSEventStreamEventFlagItemRenamed != 0) {
             // FSEvents fires ItemRenamed for both sides of a rename unpaired.
             // Normalize to created/deleted based on whether the path still exists,
             // so move-in appears as created and move-out as deleted on all platforms.
             const exists = if (std.fs.accessAbsolute(path, .{})) |_| true else |_| false;
             ctx.handler.change(path, if (exists) .created else .deleted, ot) catch {};
-        }
-        if (flags & kFSEventStreamEventFlagItemModified != 0) {
+            // If a write was coalesced with a move-in, also emit the modify.
+            if (exists and flags & kFSEventStreamEventFlagItemModified != 0) {
+                ctx.handler.change(path, .modified, ot) catch {};
+            }
+        } else if (flags & kFSEventStreamEventFlagItemModified != 0) {
             ctx.handler.change(path, .modified, ot) catch {};
+        } else if (flags & kFSEventStreamEventFlagItemCreated != 0) {
+            ctx.handler.change(path, .created, ot) catch {};
         }
     }
 }
