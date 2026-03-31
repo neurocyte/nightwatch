@@ -9,7 +9,7 @@ pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
 pub const emits_rename_for_dirs = false;
-pub const emits_subtree_created_on_movein = false; // FSEvents emits per-path events only; no subtree synthesis
+pub const emits_subtree_created_on_movein = true;
 
 handler: *Handler,
 stream: ?*anyopaque, // FSEventStreamRef
@@ -251,6 +251,10 @@ fn callback(
             // so move-in appears as created and move-out as deleted on all platforms.
             const exists = if (std.fs.accessAbsolute(path, .{})) |_| true else |_| false;
             ctx.handler.change(path, if (exists) .created else .deleted, ot) catch {};
+            // If a directory was moved in from outside the watched tree, FSEvents
+            // only fires for the directory itself - not for its pre-existing contents.
+            // Walk the subtree and emit individual created events for each entry.
+            if (exists and ot == .dir) emit_subtree_created(ctx.handler, path);
             // If a write was coalesced with a move-in, also emit the modify.
             if (exists and flags & kFSEventStreamEventFlagItemModified != 0) {
                 ctx.handler.change(path, .modified, ot) catch {};
@@ -260,6 +264,27 @@ fn callback(
         } else if (flags & kFSEventStreamEventFlagItemCreated != 0) {
             ctx.handler.change(path, .created, ot) catch {};
         }
+    }
+}
+
+// Walk dir_path recursively, emitting 'created' events for all contents.
+// Called when a directory is moved into the watched tree: FSEvents fires
+// ItemRenamed only for the directory itself, not for its pre-existing contents.
+// Uses only stack storage so it can be called from the GCD callback thread.
+fn emit_subtree_created(handler: *Handler, dir_path: []const u8) void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const ot: ObjectType = switch (entry.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => continue,
+        };
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        handler.change(full_path, .created, ot) catch {};
+        if (ot == .dir) emit_subtree_created(handler, full_path);
     }
 }
 
