@@ -133,19 +133,19 @@ var win_shutdown = std.atomic.Value(bool).init(false);
 fn win_ctrl_handler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
     _ = ctrl_type;
     win_shutdown.store(true, .release);
-    return std.os.windows.TRUE;
+    return .TRUE;
 }
 
-fn run_windows() void {
+fn run_windows(io: std.Io) void {
     const SetConsoleCtrlHandler = struct {
         extern "kernel32" fn SetConsoleCtrlHandler(
             HandlerRoutine: ?*const fn (std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL,
             Add: std.os.windows.BOOL,
         ) callconv(.winapi) std.os.windows.BOOL;
     }.SetConsoleCtrlHandler;
-    _ = SetConsoleCtrlHandler(win_ctrl_handler, std.os.windows.TRUE);
+    _ = SetConsoleCtrlHandler(win_ctrl_handler, .TRUE);
     while (!win_shutdown.load(.acquire)) {
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
     }
 }
 
@@ -309,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
     if (Watcher.interface_type == .polling) {
         try run_linux(&watcher);
     } else if (builtin.os.tag == .windows) {
-        run_windows();
+        run_windows(init.io);
     } else if (is_posix) {
         run_posix();
     }

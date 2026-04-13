@@ -13,6 +13,23 @@ pub const emits_subtree_created_on_movein = true;
 
 const windows = std.os.windows;
 
+// Types removed from std.os.windows in zig-0.16.
+const OVERLAPPED = extern struct {
+    Internal: windows.ULONG_PTR = 0,
+    InternalHigh: windows.ULONG_PTR = 0,
+    Offset: windows.DWORD = 0,
+    OffsetHigh: windows.DWORD = 0,
+    hEvent: ?windows.HANDLE = null,
+};
+
+// Constants removed from std.os.windows in zig-0.16.
+const GENERIC_READ: windows.DWORD = 0x80000000;
+const FILE_SHARE_READ: windows.DWORD = 0x00000001;
+const FILE_SHARE_WRITE: windows.DWORD = 0x00000002;
+const FILE_SHARE_DELETE: windows.DWORD = 0x00000004;
+const OPEN_EXISTING: windows.DWORD = 3;
+const INFINITE: windows.DWORD = 0xFFFFFFFF;
+
 const win32 = struct {
     pub extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) windows.BOOL;
     pub extern "kernel32" fn ReadDirectoryChangesW(
@@ -22,14 +39,14 @@ const win32 = struct {
         bWatchSubtree: windows.BOOL,
         dwNotifyFilter: windows.DWORD,
         lpBytesReturned: ?*windows.DWORD,
-        lpOverlapped: ?*windows.OVERLAPPED,
+        lpOverlapped: ?*OVERLAPPED,
         lpCompletionRoutine: ?*anyopaque,
     ) callconv(.winapi) windows.BOOL;
     pub extern "kernel32" fn GetQueuedCompletionStatus(
         CompletionPort: windows.HANDLE,
         lpNumberOfBytesTransferred: *windows.DWORD,
         lpCompletionKey: *windows.ULONG_PTR,
-        lpOverlapped: *?*windows.OVERLAPPED,
+        lpOverlapped: *?*OVERLAPPED,
         dwMilliseconds: windows.DWORD,
     ) callconv(.winapi) windows.BOOL;
     pub extern "kernel32" fn CreateFileW(
@@ -45,9 +62,15 @@ const win32 = struct {
         CompletionPort: windows.HANDLE,
         dwNumberOfBytesTransferred: windows.DWORD,
         dwCompletionKey: windows.ULONG_PTR,
-        lpOverlapped: ?*windows.OVERLAPPED,
+        lpOverlapped: ?*OVERLAPPED,
     ) callconv(.winapi) windows.BOOL;
     pub extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const windows.WCHAR) callconv(.winapi) windows.DWORD;
+    pub extern "kernel32" fn CreateIoCompletionPort(
+        FileHandle: windows.HANDLE,
+        ExistingCompletionPort: ?windows.HANDLE,
+        CompletionKey: windows.ULONG_PTR,
+        NumberOfConcurrentThreads: windows.DWORD,
+    ) callconv(.winapi) ?windows.HANDLE;
 };
 
 handler: *Handler,
@@ -64,7 +87,7 @@ const SHUTDOWN_KEY: windows.ULONG_PTR = 0;
 const Watch = struct {
     handle: windows.HANDLE,
     buf: Buf,
-    overlapped: windows.OVERLAPPED,
+    overlapped: OVERLAPPED,
     path: []u8, // owned
 };
 
@@ -92,7 +115,7 @@ const notify_filter: windows.DWORD =
     0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
 pub fn init(io: std.Io, handler: *Handler) !@This() {
-    const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
+    const iocp = win32.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1) orelse return error.SystemResources;
     return .{ .handler = handler, .io = io, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = std.Io.Mutex.init, .path_types = .empty };
 }
 
@@ -131,11 +154,11 @@ fn thread_fn(
 ) void {
     var bytes: windows.DWORD = 0;
     var key: windows.ULONG_PTR = 0;
-    var overlapped_ptr: ?*windows.OVERLAPPED = null;
+    var overlapped_ptr: ?*OVERLAPPED = null;
     while (true) {
         // Block indefinitely until IOCP has a completion or shutdown signal.
-        const ok = win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &overlapped_ptr, windows.INFINITE);
-        if (ok == 0 or key == SHUTDOWN_KEY) return;
+        const ok = win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &overlapped_ptr, INFINITE);
+        if (ok == .FALSE or key == SHUTDOWN_KEY) return;
         const triggered_handle: windows.HANDLE = @ptrFromInt(key);
         watches_mutex.lockUncancelable(io);
         var it = watches.iterator();
@@ -303,8 +326,8 @@ fn thread_fn(
                 }
             }
             // Re-arm ReadDirectoryChangesW for the next batch.
-            w.overlapped = std.mem.zeroes(windows.OVERLAPPED);
-            if (win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null) == 0)
+            w.overlapped = std.mem.zeroes(OVERLAPPED);
+            if (win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, .TRUE, notify_filter, null, &w.overlapped, null) == .FALSE)
                 std.log.err("nightwatch: ReadDirectoryChangesW re-arm failed for {s}, future events lost", .{entry.key_ptr.*});
             break;
         }
@@ -320,16 +343,16 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     defer allocator.free(path_w);
     const handle = win32.CreateFileW(
         path_w,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         null,
-        windows.OPEN_EXISTING,
+        OPEN_EXISTING,
         0x02000000 | 0x40000000, // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) return error.WatchFailed;
     errdefer _ = win32.CloseHandle(handle);
-    _ = windows.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0) catch return error.WatchFailed;
+    _ = win32.CreateIoCompletionPort(handle, self.iocp, @intFromPtr(handle), 0) orelse return error.WatchFailed;
     const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4), buf_size);
     errdefer allocator.free(buf);
     const owned_path = try allocator.dupe(u8, path);
@@ -338,8 +361,8 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     // if the watches map is resized by a concurrent add_watch call.
     const w = try allocator.create(Watch);
     errdefer allocator.destroy(w);
-    w.* = .{ .handle = handle, .buf = buf, .overlapped = std.mem.zeroes(windows.OVERLAPPED), .path = owned_path };
-    if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, 1, notify_filter, null, &w.overlapped, null) == 0)
+    w.* = .{ .handle = handle, .buf = buf, .overlapped = std.mem.zeroes(OVERLAPPED), .path = owned_path };
+    if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, .TRUE, notify_filter, null, &w.overlapped, null) == .FALSE)
         return error.WatchFailed;
     try self.watches.put(allocator, owned_path, w);
     // Seed path_types with pre-existing entries so delete/rename events for
