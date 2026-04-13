@@ -22,7 +22,7 @@ watches_mutex: std.Io.Mutex,
 // Used to diff on NOTE_WRITE: detects creates, deletes, and (opportunistically)
 // modifications when the same directory fires another event later.
 // Key: independently owned dir path, value: map of owned filename -> mtime_ns.
-snapshots: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(i128)),
+snapshots: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(std.Io.Timestamp)),
 snapshots_mutex: std.Io.Mutex,
 io: std.Io,
 
@@ -38,8 +38,17 @@ const NOTE_EXTEND: u32 = 0x00000004;
 const NOTE_ATTRIB: u32 = 0x00000008;
 const NOTE_RENAME: u32 = 0x00000020;
 
-pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
-    const kq = try std.posix.kqueue();
+fn kevent_add(kq: std.posix.fd_t, kev: *const std.posix.Kevent) bool {
+    var ev_out: [1]std.posix.Kevent = undefined;
+    return std.posix.system.kevent(kq, @ptrCast(kev), 1, &ev_out, 0, null) >= 0;
+}
+
+pub fn init(io: std.Io, handler: *Handler) !@This() {
+    const kq: std.posix.fd_t = blk: {
+        const fd = std.posix.system.kqueue();
+        if (fd < 0) return error.SystemResources;
+        break :blk @intCast(fd);
+    };
     errdefer std.Io.Threaded.closeFd(kq);
     const pipe = try std.Io.Threaded.pipe2(.{});
     errdefer {
@@ -56,7 +65,7 @@ pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.K
         .data = 0,
         .udata = 0,
     };
-    _ = try std.posix.kevent(kq, &.{shutdown_kev}, &.{}, null);
+    if (!kevent_add(kq, &shutdown_kev)) return error.SystemResources;
     return .{
         .handler = handler,
         .kq = kq,
@@ -103,11 +112,12 @@ fn thread_fn(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     var events: [64]std.posix.Kevent = undefined;
     while (true) {
         // Block indefinitely until kqueue has events.
-        const n = std.posix.kevent(self.kq, &.{}, &events, null) catch |e| {
-            std.log.err("nightwatch: kevent failed: {s}, stopping watch thread", .{@errorName(e)});
+        const n_raw = std.posix.system.kevent(self.kq, @ptrCast(&events), 0, &events, @intCast(events.len), null);
+        if (n_raw < 0) {
+            std.log.err("nightwatch: kevent failed, stopping watch thread", .{});
             break;
-        };
-        for (events[0..n]) |ev| {
+        }
+        for (events[0..@intCast(n_raw)]) |ev| {
             if (ev.filter == EVFILT_READ) return; // shutdown pipe readable, exit
             if (ev.filter != EVFILT_VNODE) continue;
             const fd: std.posix.fd_t = @intCast(ev.ident);
@@ -186,7 +196,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
 
     // Collect current files (name → mtime_ns) and subdirectories.
     // No lock held while doing filesystem I/O.
-    var current_files: std.StringHashMapUnmanaged(i128) = .empty;
+    var current_files: std.StringHashMapUnmanaged(std.Io.Timestamp) = .empty;
     var current_dirs: std.ArrayListUnmanaged([]u8) = .empty;
     var iter = dir.iterate();
     while (try iter.next(self.io)) |entry| {
@@ -249,7 +259,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         while (cit.next()) |entry| {
             if (snapshot.getPtr(entry.key_ptr.*)) |stored_mtime| {
                 // File exists in both - check for modification via mtime change.
-                if (stored_mtime.* != entry.value_ptr.*) {
+                if (!std.meta.eql(stored_mtime.*, entry.value_ptr.*)) {
                     stored_mtime.* = entry.value_ptr.*;
                     try to_modify.append(tmp, entry.key_ptr.*); // from current_files (tmp)
                 }
@@ -338,35 +348,14 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     const already = self.watches.contains(path);
     self.watches_mutex.unlock(self.io);
     if (already) return;
-    const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
-        error.AccessDenied,
-        error.PermissionDenied,
-        error.PathAlreadyExists,
-        error.SymLinkLoop,
-        error.NameTooLong,
-        error.FileNotFound,
-        error.SystemResources,
-        error.NoSpaceLeft,
-        error.NotDir,
-        error.InvalidUtf8,
-        error.InvalidWtf8,
-        error.BadPathName,
-        error.NoDevice,
-        error.NetworkNotFound,
-        error.Unexpected,
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        error.ProcessNotFound,
-        error.FileTooBig,
-        error.IsDir,
-        error.DeviceBusy,
-        error.FileLocksNotSupported,
-        error.FileBusy,
-        error.WouldBlock,
-        => |e_| {
-            std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
+    const path_z = std.posix.toPosixPath(path) catch return error.WatchFailed;
+    const path_fd: std.posix.fd_t = blk: {
+        const raw = std.posix.system.open(&path_z, .{}, @as(c_uint, 0));
+        if (raw < 0) {
+            std.log.err("{s} failed: open", .{@src().fn_name});
             return error.WatchFailed;
-        },
+        }
+        break :blk @intCast(raw);
     };
     errdefer std.Io.Threaded.closeFd(path_fd);
     const kev = std.posix.Kevent{
@@ -377,20 +366,13 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
         .data = 0,
         .udata = 0,
     };
-    _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch |e| switch (e) {
-        error.AccessDenied,
-        error.SystemResources,
-        error.EventNotFound,
-        error.ProcessNotFound,
-        error.Overflow,
-        => |e_| {
-            std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
-            return error.WatchFailed;
-        },
-    };
+    if (!kevent_add(self.kq, &kev)) {
+        std.log.err("{s} failed: kevent", .{@src().fn_name});
+        return error.WatchFailed;
+    }
     // Determine if the path is a regular file or a directory.
-    const stat = std.posix.fstat(path_fd) catch null;
-    const is_file = if (stat) |s| std.posix.S.ISREG(s.mode) else false;
+    var stat_buf: std.posix.Stat = undefined;
+    const is_file = std.posix.system.fstat(path_fd, &stat_buf) == 0 and std.posix.S.ISREG(stat_buf.mode);
     const owned_path = try allocator.dupe(u8, path);
     self.watches_mutex.lockUncancelable(self.io);
     if (self.watches.contains(path)) {
@@ -420,7 +402,7 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const tmp = arena.allocator();
-    const Entry = struct { name: []u8, mtime: i128 };
+    const Entry = struct { name: []u8, mtime: std.Io.Timestamp };
     var entries: std.ArrayListUnmanaged(Entry) = .empty;
     var iter = dir.iterate();
     while (iter.next(self.io) catch null) |e| {

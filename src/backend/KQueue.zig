@@ -38,7 +38,12 @@ const NOTE_EXTEND: u32 = 0x00000004;
 const NOTE_ATTRIB: u32 = 0x00000008;
 const NOTE_RENAME: u32 = 0x00000020;
 
-pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
+fn kevent_add(kq: std.posix.fd_t, kev: *const std.posix.Kevent) bool {
+    var ev_out: [1]std.posix.Kevent = undefined;
+    return std.posix.system.kevent(kq, @ptrCast(kev), 1, &ev_out, 0, null) >= 0;
+}
+
+pub fn init(io: std.Io, handler: *Handler) !@This() {
     // Per-file kqueue watches require one open fd per watched file.  Bump
     // the soft NOFILE limit to the hard limit so large directory trees don't
     // exhaust the default quota (256 on macOS, 1024 on many FreeBSD installs).
@@ -46,7 +51,11 @@ pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.K
         if (rl.cur < rl.max)
             std.posix.setrlimit(.NOFILE, .{ .cur = rl.max, .max = rl.max }) catch {};
     } else |_| {}
-    const kq = try std.posix.kqueue();
+    const kq: std.posix.fd_t = blk: {
+        const fd = std.posix.system.kqueue();
+        if (fd < 0) return error.SystemResources;
+        break :blk @intCast(fd);
+    };
     errdefer std.Io.Threaded.closeFd(kq);
     const pipe = try std.Io.Threaded.pipe2(.{});
     errdefer {
@@ -63,7 +72,7 @@ pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.K
         .data = 0,
         .udata = 0,
     };
-    _ = try std.posix.kevent(kq, &.{shutdown_kev}, &.{}, null);
+    if (!kevent_add(kq, &shutdown_kev)) return error.SystemResources;
     return .{
         .handler = handler,
         .kq = kq,
@@ -118,11 +127,12 @@ fn thread_fn(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     var events: [64]std.posix.Kevent = undefined;
     while (true) {
         // Block indefinitely until kqueue has events.
-        const n = std.posix.kevent(self.kq, &.{}, &events, null) catch |e| {
-            std.log.err("nightwatch: kevent failed: {s}, stopping watch thread", .{@errorName(e)});
+        const n_raw = std.posix.system.kevent(self.kq, @ptrCast(&events), 0, &events, @intCast(events.len), null);
+        if (n_raw < 0) {
+            std.log.err("nightwatch: kevent failed, stopping watch thread", .{});
             break;
-        };
-        for (events[0..n]) |ev| {
+        }
+        for (events[0..@intCast(n_raw)]) |ev| {
             if (ev.filter == EVFILT_READ) return; // shutdown pipe readable, exit
             if (ev.filter != EVFILT_VNODE) continue;
             const fd: std.posix.fd_t = @intCast(ev.ident);
@@ -344,7 +354,12 @@ fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []con
     const already = self.file_watches.contains(path);
     self.file_watches_mutex.unlock(self.io);
     if (already) return;
-    const fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return;
+    const path_z = std.posix.toPosixPath(path) catch return;
+    const fd: std.posix.fd_t = blk: {
+        const raw = std.posix.system.open(&path_z, .{}, @as(c_uint, 0));
+        if (raw < 0) return;
+        break :blk @intCast(raw);
+    };
     const kev = std.posix.Kevent{
         .ident = @intCast(fd),
         .filter = EVFILT_VNODE,
@@ -353,10 +368,10 @@ fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []con
         .data = 0,
         .udata = 0,
     };
-    _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch {
+    if (!kevent_add(self.kq, &kev)) {
         std.Io.Threaded.closeFd(fd);
         return;
-    };
+    }
     const owned = allocator.dupe(u8, path) catch {
         std.Io.Threaded.closeFd(fd);
         return;
@@ -392,35 +407,14 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     const already = self.watches.contains(path);
     self.watches_mutex.unlock(self.io);
     if (already) return;
-    const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
-        error.AccessDenied,
-        error.PermissionDenied,
-        error.PathAlreadyExists,
-        error.SymLinkLoop,
-        error.NameTooLong,
-        error.FileNotFound,
-        error.SystemResources,
-        error.NoSpaceLeft,
-        error.NotDir,
-        error.InvalidUtf8,
-        error.InvalidWtf8,
-        error.BadPathName,
-        error.NoDevice,
-        error.NetworkNotFound,
-        error.Unexpected,
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        error.ProcessNotFound,
-        error.FileTooBig,
-        error.IsDir,
-        error.DeviceBusy,
-        error.FileLocksNotSupported,
-        error.FileBusy,
-        error.WouldBlock,
-        => |e_| {
-            std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
+    const path_z = std.posix.toPosixPath(path) catch return error.WatchFailed;
+    const path_fd: std.posix.fd_t = blk: {
+        const raw = std.posix.system.open(&path_z, .{}, @as(c_uint, 0));
+        if (raw < 0) {
+            std.log.err("{s} failed: open", .{@src().fn_name});
             return error.WatchFailed;
-        },
+        }
+        break :blk @intCast(raw);
     };
     errdefer std.Io.Threaded.closeFd(path_fd);
     const kev = std.posix.Kevent{
@@ -431,17 +425,10 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
         .data = 0,
         .udata = 0,
     };
-    _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch |e| switch (e) {
-        error.AccessDenied,
-        error.SystemResources,
-        error.EventNotFound,
-        error.ProcessNotFound,
-        error.Overflow,
-        => |e_| {
-            std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
-            return error.WatchFailed;
-        },
-    };
+    if (!kevent_add(self.kq, &kev)) {
+        std.log.err("{s} failed: kevent", .{@src().fn_name});
+        return error.WatchFailed;
+    }
     const owned_path = try allocator.dupe(u8, path);
     self.watches_mutex.lockUncancelable(self.io);
     if (self.watches.contains(path)) {
@@ -458,16 +445,11 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     self.watches_mutex.unlock(self.io);
     // Take initial snapshot so first NOTE_WRITE has a baseline to diff against.
     self.take_snapshot(allocator, owned_path) catch |e| switch (e) {
-        error.AccessDenied,
-        error.PermissionDenied,
-        error.SystemResources,
-        error.InvalidUtf8,
-        error.Unexpected,
-        => |e_| {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e_| {
             std.log.err("{s} failed: {t}", .{ @src().fn_name, e_ });
             return error.WatchFailed;
         },
-        error.OutOfMemory => return error.OutOfMemory,
     };
 }
 
