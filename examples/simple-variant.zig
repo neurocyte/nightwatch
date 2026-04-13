@@ -3,7 +3,10 @@
 //!
 //! Build and run (from this directory):
 //!
-//!   zig build-exe --dep nightwatch -Msimple-variant=simple-variant.zig -Mnightwatch=../src/nightwatch.zig
+//!   zig build-exe \
+//!     --dep nightwatch -Msimple-variant=simple-variant.zig \
+//!     --dep build_options -Mnightwatch=../src/nightwatch.zig \
+//!     -Mbuild_options=build_options.zig
 //!   ./simple-variant
 
 const nightwatch = @import("nightwatch");
