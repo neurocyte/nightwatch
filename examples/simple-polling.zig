@@ -38,10 +38,9 @@ const H = struct {
     }
 };
 
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+pub fn main(init: std.process.Init) !void {
     var h = H{ .handler = .{ .vtable = &H.vtable } };
-    var watcher = try Watcher.init(allocator, &h.handler);
+    var watcher = try Watcher.init(init.io, init.gpa, &h.handler);
     defer watcher.deinit();
     try watcher.watch(".");
 

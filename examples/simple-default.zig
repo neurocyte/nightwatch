@@ -23,11 +23,10 @@ const H = struct {
     }
 };
 
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+pub fn main(init: std.process.Init) !void {
     var h = H{ .handler = .{ .vtable = &H.vtable } };
-    var watcher = try nightwatch.Default.init(allocator, &h.handler);
+    var watcher = try nightwatch.Default.init(init.io, init.gpa, &h.handler);
     defer watcher.deinit();
     try watcher.watch(".");
-    std.Thread.sleep(std.time.ns_per_s * 60);
+    std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(60_000), .awake) catch {};
 }

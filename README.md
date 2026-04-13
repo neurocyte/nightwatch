@@ -81,7 +81,7 @@ The Watch is written in **Zig** and built using the Zig build system.
 
 ## Requirements
 
-- Zig (currently zig-0.15.2)
+- Zig - zig-0.16.0-dev (master branch) or zig-0.15.2 (zig-0.15 branch)
 
 ## Build CLI
 
@@ -145,11 +145,13 @@ const H = struct {
     }
 };
 
-var h = H{ .handler = .{ .vtable = &H.vtable } };
-var watcher = try nightwatch.Default.init(allocator, &h.handler);
-defer watcher.deinit();
-try watcher.watch("/path/to/dir");
-// watcher delivers events on a background thread until deinit()
+pub fn main(init: std.process.Init) !void {
+    var h = H{ .handler = .{ .vtable = &H.vtable } };
+    var watcher = try nightwatch.Default.init(init.io, init.gpa, &h.handler);
+    defer watcher.deinit();
+    try watcher.watch("/path/to/dir");
+    // watcher delivers events on a background thread until deinit()
+}
 ```
 
 See the [`examples/`](examples/) directory for complete, buildable programs.
