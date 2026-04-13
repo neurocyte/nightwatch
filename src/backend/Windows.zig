@@ -51,10 +51,11 @@ const win32 = struct {
 };
 
 handler: *Handler,
+io: std.Io,
 iocp: windows.HANDLE,
 thread: ?std.Thread,
 watches: std.StringHashMapUnmanaged(*Watch),
-watches_mutex: std.Thread.Mutex,
+watches_mutex: std.Io.Mutex,
 path_types: std.StringHashMapUnmanaged(ObjectType),
 
 // A completion key of zero is used to signal the background thread to exit.
@@ -90,9 +91,9 @@ const notify_filter: windows.DWORD =
     0x00000010 | // FILE_NOTIFY_CHANGE_LAST_WRITE
     0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
-pub fn init(handler: *Handler) windows.CreateIoCompletionPortError!@This() {
+pub fn init(io: std.Io, handler: *Handler) windows.CreateIoCompletionPortError!@This() {
     const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
-    return .{ .handler = handler, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = .{}, .path_types = .empty };
+    return .{ .handler = handler, .io = io, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = std.Io.Mutex.init, .path_types = .empty };
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -116,14 +117,15 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
 
 pub fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} || std.Thread.SpawnError)!void {
     if (self.thread != null) return error.AlreadyArmed;
-    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ allocator, self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
+    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ allocator, self.io, self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
 }
 
 fn thread_fn(
     allocator: std.mem.Allocator,
+    io: std.Io,
     iocp: windows.HANDLE,
     watches: *std.StringHashMapUnmanaged(*Watch),
-    watches_mutex: *std.Thread.Mutex,
+    watches_mutex: *std.Io.Mutex,
     path_types: *std.StringHashMapUnmanaged(ObjectType),
     handler: *Handler,
 ) void {
@@ -135,7 +137,7 @@ fn thread_fn(
         const ok = win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &overlapped_ptr, windows.INFINITE);
         if (ok == 0 or key == SHUTDOWN_KEY) return;
         const triggered_handle: windows.HANDLE = @ptrFromInt(key);
-        watches_mutex.lock();
+        watches_mutex.lockUncancelable(io);
         var it = watches.iterator();
         while (it.next()) |entry| {
             const w = entry.value_ptr.*;
@@ -198,16 +200,16 @@ fn thread_fn(
                             }
                             // For dirs, also scan children into cache.
                             if (pr.object_type == .dir)
-                                scan_path_types_into(allocator, path_types, full_path);
+                                scan_path_types_into(allocator, io, path_types, full_path);
                             const next_entry_offset = info.NextEntryOffset;
-                            watches_mutex.unlock();
+                            watches_mutex.unlock(io);
                             handler.rename(src, full_path, pr.object_type) catch |e| {
                                 std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
-                                watches_mutex.lock();
+                                watches_mutex.lockUncancelable(io);
                                 pending_rename = null;
                                 break;
                             };
-                            watches_mutex.lock();
+                            watches_mutex.lockUncancelable(io);
                             pending_rename = null;
                             if (next_entry_offset == 0) break;
                             offset += next_entry_offset;
@@ -259,7 +261,7 @@ fn thread_fn(
                         // contents into the cache so subsequent deletes resolve their
                         // type. Scanning a genuinely new (empty) directory is a no-op.
                         if (ot == .dir and event_type == .created)
-                            scan_path_types_into(allocator, path_types, full_path);
+                            scan_path_types_into(allocator, io, path_types, full_path);
                         break :blk ot;
                     };
                     // Suppress FILE_ACTION_MODIFIED on directories: these are
@@ -274,20 +276,20 @@ fn thread_fn(
                     // the main thread may call remove_watch() which frees w.buf, making
                     // the `info` pointer (which points into w.buf) a dangling reference.
                     const next_entry_offset = info.NextEntryOffset;
-                    watches_mutex.unlock();
+                    watches_mutex.unlock(io);
                     handler.change(full_path, event_type, object_type) catch |e| {
                         std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
-                        watches_mutex.lock();
+                        watches_mutex.lockUncancelable(io);
                         break;
                     };
                     if (event_type == .created and object_type == .dir) {
-                        emit_subtree_created(handler, full_path) catch |e| {
+                        emit_subtree_created(handler, io, full_path) catch |e| {
                             std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
-                            watches_mutex.lock();
+                            watches_mutex.lockUncancelable(io);
                             break;
                         };
                     }
-                    watches_mutex.lock();
+                    watches_mutex.lockUncancelable(io);
                     if (next_entry_offset == 0) break;
                     offset += next_entry_offset;
                 }
@@ -295,9 +297,9 @@ fn thread_fn(
                 // Emit as .deleted, matching INotify behaviour.
                 if (pending_rename) |pr| {
                     const src = pr.path_buf[0..pr.path_len];
-                    watches_mutex.unlock();
+                    watches_mutex.unlock(io);
                     handler.change(src, .deleted, pr.object_type) catch {};
-                    watches_mutex.lock();
+                    watches_mutex.lockUncancelable(io);
                 }
             }
             // Re-arm ReadDirectoryChangesW for the next batch.
@@ -306,13 +308,13 @@ fn thread_fn(
                 std.log.err("nightwatch: ReadDirectoryChangesW re-arm failed for {s}, future events lost", .{entry.key_ptr.*});
             break;
         }
-        watches_mutex.unlock();
+        watches_mutex.unlock(io);
     }
 }
 
 pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed }!void {
-    self.watches_mutex.lock();
-    defer self.watches_mutex.unlock();
+    self.watches_mutex.lockUncancelable(self.io);
+    defer self.watches_mutex.unlock(self.io);
     if (self.watches.contains(path)) return;
     const path_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, path) catch return error.WatchFailed;
     defer allocator.free(path_w);
@@ -353,11 +355,11 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
 // Called after a directory is created or moved into the watched tree so callers
 // see individual 'created' events for all pre-existing contents.
 // Must be called with watches_mutex NOT held (handler calls are outside the lock).
-fn emit_subtree_created(handler: *Handler, dir_path: []const u8) error{HandlerFailed}!void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn emit_subtree_created(handler: *Handler, io: std.Io, dir_path: []const u8) error{HandlerFailed}!void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
     var iter = dir.iterate();
-    while (iter.next() catch return) |entry| {
+    while (iter.next(io) catch return) |entry| {
         const ot: ObjectType = switch (entry.kind) {
             .file => .file,
             .directory => .dir,
@@ -366,19 +368,19 @@ fn emit_subtree_created(handler: *Handler, dir_path: []const u8) error{HandlerFa
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ dir_path, entry.name }) catch continue;
         try handler.change(full_path, EventType.created, ot);
-        if (ot == .dir) try emit_subtree_created(handler, full_path);
+        if (ot == .dir) try emit_subtree_created(handler, io, full_path);
     }
 }
 
 fn scan_path_types(self: *@This(), allocator: std.mem.Allocator, root: []const u8) void {
-    scan_path_types_into(allocator, &self.path_types, root);
+    scan_path_types_into(allocator, self.io, &self.path_types, root);
 }
 
-fn scan_path_types_into(allocator: std.mem.Allocator, path_types: *std.StringHashMapUnmanaged(ObjectType), root: []const u8) void {
-    var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn scan_path_types_into(allocator: std.mem.Allocator, io: std.Io, path_types: *std.StringHashMapUnmanaged(ObjectType), root: []const u8) void {
+    var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return;
+    defer dir.close(io);
     var iter = dir.iterate();
-    while (iter.next() catch return) |entry| {
+    while (iter.next(io) catch return) |entry| {
         const ot: ObjectType = switch (entry.kind) {
             .directory => .dir,
             .file => .file,
@@ -394,13 +396,13 @@ fn scan_path_types_into(allocator: std.mem.Allocator, path_types: *std.StringHas
             };
         }
         gop.value_ptr.* = ot;
-        if (ot == .dir) scan_path_types_into(allocator, path_types, gop.key_ptr.*);
+        if (ot == .dir) scan_path_types_into(allocator, io, path_types, gop.key_ptr.*);
     }
 }
 
 pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
-    self.watches_mutex.lock();
-    defer self.watches_mutex.unlock();
+    self.watches_mutex.lockUncancelable(self.io);
+    defer self.watches_mutex.unlock(self.io);
     if (self.watches.fetchRemove(path)) |entry| {
         const w = entry.value;
         _ = win32.CloseHandle(w.handle);

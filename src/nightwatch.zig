@@ -103,6 +103,7 @@ pub fn Create(comptime variant: Variant) type {
         };
 
         allocator: std.mem.Allocator,
+        io: std.Io,
         interceptor: *InterceptorType,
 
         /// Whether this backend detects file content modifications in real time.
@@ -125,19 +126,20 @@ pub fn Create(comptime variant: Variant) type {
         /// threaded variants the backend's internal thread will call into it
         /// concurrently; for the polling variant calls happen synchronously
         /// inside `handle_read_ready()`.
-        pub fn init(allocator: std.mem.Allocator, handler: *Handler) !@This() {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, handler: *Handler) !@This() {
             const ic = try allocator.create(InterceptorType);
             errdefer allocator.destroy(ic);
             ic.* = .{
                 .handler = .{ .vtable = &InterceptorType.vtable },
                 .user_handler = handler,
+                .io = io,
                 .allocator = allocator,
                 .backend = undefined,
             };
-            ic.backend = try Backend.init(&ic.handler);
+            ic.backend = try Backend.init(io, &ic.handler);
             errdefer ic.backend.deinit(allocator);
             try ic.backend.arm(allocator);
-            return .{ .allocator = allocator, .interceptor = ic };
+            return .{ .io = io, .allocator = allocator, .interceptor = ic };
         }
 
         /// Stop the watcher, release all watches, and free resources.
@@ -170,7 +172,8 @@ pub fn Create(comptime variant: Variant) type {
                 path
             else blk: {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return error.WatchFailed;
+                const cwd_len = std.Io.Dir.cwd().realPath(self.io, &cwd_buf) catch return error.WatchFailed;
+                const cwd = cwd_buf[0..cwd_len];
                 break :blk std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ cwd, std.fs.path.sep, path }) catch return error.WatchFailed;
             };
             // Collapse any . and .. segments without touching the filesystem so that
@@ -180,7 +183,7 @@ pub fn Create(comptime variant: Variant) type {
             defer self.allocator.free(norm);
             try self.interceptor.backend.add_watch(self.allocator, norm);
             if (!Backend.watches_recursively) {
-                recurse_watch(&self.interceptor.backend, self.allocator, norm);
+                recurse_watch(&self.interceptor.backend, self.io, self.allocator, norm);
             }
         }
 
@@ -229,6 +232,7 @@ pub fn Create(comptime variant: Variant) type {
         const Interceptor = struct {
             handler: Handler,
             user_handler: *Handler,
+            io: std.Io,
             allocator: std.mem.Allocator,
             backend: Backend,
 
@@ -242,7 +246,7 @@ pub fn Create(comptime variant: Variant) type {
                 if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
                     self.backend.add_watch(self.allocator, path) catch |e|
                         std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ path, @errorName(e) });
-                    recurse_watch(&self.backend, self.allocator, path);
+                    recurse_watch(&self.backend, self.io, self.allocator, path);
                 }
                 return self.user_handler.change(path, event_type, object_type);
             }
@@ -256,6 +260,7 @@ pub fn Create(comptime variant: Variant) type {
         const PollingInterceptor = struct {
             handler: PollingHandler,
             user_handler: *PollingHandler,
+            io: std.Io,
             allocator: std.mem.Allocator,
             backend: Backend,
 
@@ -272,7 +277,7 @@ pub fn Create(comptime variant: Variant) type {
                 if (event_type == .created and object_type == .dir and !Backend.watches_recursively) {
                     self.backend.add_watch(self.allocator, path) catch |e|
                         std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ path, @errorName(e) });
-                    recurse_watch(&self.backend, self.allocator, path);
+                    recurse_watch(&self.backend, self.io, self.allocator, path);
                 }
                 return self.user_handler.change(path, event_type, object_type);
             }
@@ -289,17 +294,17 @@ pub fn Create(comptime variant: Variant) type {
         };
 
         // Scans subdirectories of dir_path and adds a watch for each one, recursively.
-        fn recurse_watch(backend: *Backend, allocator: std.mem.Allocator, dir_path: []const u8) void {
-            var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-            defer dir.close();
+        fn recurse_watch(backend: *Backend, io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8) void {
+            var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+            defer dir.close(io);
             var it = dir.iterate();
-            while (it.next() catch return) |entry| {
+            while (it.next(io) catch return) |entry| {
                 if (entry.kind != .directory) continue;
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const sub = std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
                 backend.add_watch(allocator, sub) catch |e|
                     std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ sub, @errorName(e) });
-                recurse_watch(backend, allocator, sub);
+                recurse_watch(backend, io, allocator, sub);
             }
         }
     };

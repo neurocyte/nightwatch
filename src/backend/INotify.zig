@@ -13,6 +13,7 @@ const PendingRename = struct {
 pub fn Create(comptime variant: InterfaceType) type {
     return struct {
         handler: *Handler,
+        io: std.Io,
         inotify_fd: std.posix.fd_t,
         watches: std.AutoHashMapUnmanaged(i32, WatchEntry), // wd -> {owned path, is dir}
         // Protects `watches` against concurrent access by the background thread
@@ -20,7 +21,7 @@ pub fn Create(comptime variant: InterfaceType) type {
         // (add_watch / remove_watch).  Void for the polling variant, which is
         // single-threaded.
         watches_mutex: switch (variant) {
-            .threaded => std.Thread.Mutex,
+            .threaded => std.Io.Mutex,
             .polling => void,
         },
         pending_renames: std.ArrayListUnmanaged(PendingRename),
@@ -56,17 +57,20 @@ pub fn Create(comptime variant: InterfaceType) type {
 
         const in_flags: std.os.linux.O = .{ .NONBLOCK = true };
 
-        pub fn init(handler: *Handler) !@This() {
-            const inotify_fd = try std.posix.inotify_init1(@bitCast(in_flags));
-            errdefer std.posix.close(inotify_fd);
+        pub fn init(io: std.Io, handler: *Handler) !@This() {
+            const rc = std.os.linux.inotify_init1(@bitCast(in_flags));
+            if (std.posix.errno(rc) != .SUCCESS) return error.WatchFailed;
+            const inotify_fd: std.posix.fd_t = @intCast(rc);
+            errdefer std.Io.Threaded.closeFd(inotify_fd);
             switch (variant) {
                 .threaded => {
-                    const stop_pipe = try std.posix.pipe();
+                    const stop_pipe = try std.Io.Threaded.pipe2(.{});
                     return .{
                         .handler = handler,
+                        .io = io,
                         .inotify_fd = inotify_fd,
                         .watches = .empty,
-                        .watches_mutex = .{},
+                        .watches_mutex = std.Io.Mutex.init,
                         .pending_renames = .empty,
                         .stop_pipe = stop_pipe,
                         .thread = null,
@@ -75,6 +79,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                 .polling => {
                     return .{
                         .handler = handler,
+                        .io = io,
                         .inotify_fd = inotify_fd,
                         .watches = .empty,
                         .watches_mutex = {},
@@ -89,17 +94,17 @@ pub fn Create(comptime variant: InterfaceType) type {
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             if (comptime variant == .threaded) {
                 // Signal thread to stop and wait for it to exit.
-                _ = std.posix.write(self.stop_pipe[1], "x") catch {};
+                _ = std.posix.system.write(self.stop_pipe[1], "x", 1);
                 if (self.thread) |t| t.join();
-                std.posix.close(self.stop_pipe[0]);
-                std.posix.close(self.stop_pipe[1]);
+                std.Io.Threaded.closeFd(self.stop_pipe[0]);
+                std.Io.Threaded.closeFd(self.stop_pipe[1]);
             }
             var it = self.watches.iterator();
             while (it.next()) |entry| allocator.free(entry.value_ptr.*.path);
             self.watches.deinit(allocator);
             for (self.pending_renames.items) |r| allocator.free(r.path);
             self.pending_renames.deinit(allocator);
-            std.posix.close(self.inotify_fd);
+            std.Io.Threaded.closeFd(self.inotify_fd);
         }
 
         pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{HandlerFailed}!void {
@@ -150,22 +155,22 @@ pub fn Create(comptime variant: InterfaceType) type {
                 },
             }
             const is_dir = blk: {
-                var d = std.fs.openDirAbsolute(path, .{}) catch break :blk false;
-                defer d.close();
+                var d = std.Io.Dir.openDirAbsolute(self.io, path, .{}) catch break :blk false;
+                defer d.close(self.io);
                 break :blk true;
             };
             const owned_path = try allocator.dupe(u8, path);
             errdefer allocator.free(owned_path);
-            if (comptime variant == .threaded) self.watches_mutex.lock();
-            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
+            if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
             const result = try self.watches.getOrPut(allocator, @intCast(wd));
             if (result.found_existing) allocator.free(result.value_ptr.*.path);
             result.value_ptr.* = .{ .path = owned_path, .is_dir = is_dir };
         }
 
         pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
-            if (comptime variant == .threaded) self.watches_mutex.lock();
-            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
+            if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
             var it = self.watches.iterator();
             while (it.next()) |entry| {
                 if (!std.mem.eql(u8, entry.value_ptr.*.path, path)) continue;
@@ -177,8 +182,8 @@ pub fn Create(comptime variant: InterfaceType) type {
         }
 
         fn has_watch_for_path(self: *@This(), path: []const u8) bool {
-            if (comptime variant == .threaded) self.watches_mutex.lock();
-            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
+            if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
             var it = self.watches.iterator();
             while (it.next()) |entry| {
                 if (std.mem.eql(u8, entry.value_ptr.*.path, path)) return true;
@@ -190,8 +195,8 @@ pub fn Create(comptime variant: InterfaceType) type {
         // Any entry equal to old_path is updated to new_path; any entry whose
         // path begins with old_path + sep has its prefix replaced with new_path.
         fn rename_watch_paths(self: *@This(), allocator: std.mem.Allocator, old_path: []const u8, new_path: []const u8) void {
-            if (comptime variant == .threaded) self.watches_mutex.lock();
-            defer if (comptime variant == .threaded) self.watches_mutex.unlock();
+            if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
             var it = self.watches.valueIterator();
             while (it.next()) |entry| {
                 if (std.mem.eql(u8, entry.path, old_path)) {
@@ -216,10 +221,10 @@ pub fn Create(comptime variant: InterfaceType) type {
         // subdirectory.  Called after an unpaired IN_MOVED_TO for a directory so that
         // the caller sees individual 'created' events for the moved-in tree contents.
         fn emit_subtree_created(self: *@This(), dir_path: []const u8) error{HandlerFailed}!void {
-            var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-            defer dir.close();
+            var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return;
+            defer dir.close(self.io);
             var iter = dir.iterate();
-            while (iter.next() catch return) |entry| {
+            while (iter.next(self.io) catch return) |entry| {
                 const ot: ObjectType = switch (entry.kind) {
                     .file => .file,
                     .directory => .dir,
@@ -277,13 +282,13 @@ pub fn Create(comptime variant: InterfaceType) type {
                     var watched_buf: [std.fs.max_path_bytes]u8 = undefined;
                     var watched_len: usize = 0;
                     var watched_is_dir = false;
-                    if (comptime variant == .threaded) self.watches_mutex.lock();
+                    if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
                     if (self.watches.get(ev.wd)) |e| {
                         @memcpy(watched_buf[0..e.path.len], e.path);
                         watched_len = e.path.len;
                         watched_is_dir = e.is_dir;
                     }
-                    if (comptime variant == .threaded) self.watches_mutex.unlock();
+                    if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
                     if (watched_len == 0) continue;
                     const watched_path = watched_buf[0..watched_len];
 

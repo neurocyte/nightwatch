@@ -16,14 +16,15 @@ kq: std.posix.fd_t,
 shutdown_pipe: [2]std.posix.fd_t, // [0]=read [1]=write; write a byte to wake the thread
 thread: ?std.Thread,
 watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned dir path -> fd
-watches_mutex: std.Thread.Mutex,
+watches_mutex: std.Io.Mutex,
 file_watches: std.StringHashMapUnmanaged(std.posix.fd_t), // owned file path -> fd
-file_watches_mutex: std.Thread.Mutex,
+file_watches_mutex: std.Io.Mutex,
 // Per-directory snapshots of filenames, used to diff on NOTE_WRITE.
 // Key: independently owned dir path, value: set of owned filenames.
 // Accessed from both the main thread (add_watch) and the background thread (scan_dir).
 snapshots: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)),
-snapshots_mutex: std.Thread.Mutex,
+snapshots_mutex: std.Io.Mutex,
+io: std.Io,
 
 const EVFILT_VNODE: i16 = -4;
 const EVFILT_READ: i16 = -1;
@@ -37,7 +38,7 @@ const NOTE_EXTEND: u32 = 0x00000004;
 const NOTE_ATTRIB: u32 = 0x00000008;
 const NOTE_RENAME: u32 = 0x00000020;
 
-pub fn init(handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
+pub fn init(io: std.Io, handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!@This() {
     // Per-file kqueue watches require one open fd per watched file.  Bump
     // the soft NOFILE limit to the hard limit so large directory trees don't
     // exhaust the default quota (256 on macOS, 1024 on many FreeBSD installs).
@@ -46,11 +47,11 @@ pub fn init(handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!
             std.posix.setrlimit(.NOFILE, .{ .cur = rl.max, .max = rl.max }) catch {};
     } else |_| {}
     const kq = try std.posix.kqueue();
-    errdefer std.posix.close(kq);
-    const pipe = try std.posix.pipe();
+    errdefer std.Io.Threaded.closeFd(kq);
+    const pipe = try std.Io.Threaded.pipe2(.{});
     errdefer {
-        std.posix.close(pipe[0]);
-        std.posix.close(pipe[1]);
+        std.Io.Threaded.closeFd(pipe[0]);
+        std.Io.Threaded.closeFd(pipe[1]);
     }
     // Register the read end of the shutdown pipe with kqueue so the thread
     // wakes up when we want to shut down.
@@ -69,29 +70,30 @@ pub fn init(handler: *Handler) (std.posix.KQueueError || std.posix.KEventError)!
         .shutdown_pipe = pipe,
         .thread = null,
         .watches = .empty,
-        .watches_mutex = .{},
+        .watches_mutex = std.Io.Mutex.init,
         .file_watches = .empty,
-        .file_watches_mutex = .{},
+        .file_watches_mutex = std.Io.Mutex.init,
         .snapshots = .empty,
-        .snapshots_mutex = .{},
+        .snapshots_mutex = std.Io.Mutex.init,
+        .io = io,
     };
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     // Signal the thread to exit by writing to the shutdown pipe.
-    _ = std.posix.write(self.shutdown_pipe[1], &[_]u8{0}) catch {};
+    _ = std.posix.system.write(self.shutdown_pipe[1], &[_]u8{0}, 1);
     if (self.thread) |t| t.join();
-    std.posix.close(self.shutdown_pipe[0]);
-    std.posix.close(self.shutdown_pipe[1]);
+    std.Io.Threaded.closeFd(self.shutdown_pipe[0]);
+    std.Io.Threaded.closeFd(self.shutdown_pipe[1]);
     var it = self.watches.iterator();
     while (it.next()) |entry| {
-        std.posix.close(entry.value_ptr.*);
+        std.Io.Threaded.closeFd(entry.value_ptr.*);
         allocator.free(entry.key_ptr.*);
     }
     self.watches.deinit(allocator);
     var fit = self.file_watches.iterator();
     while (fit.next()) |entry| {
-        std.posix.close(entry.value_ptr.*);
+        std.Io.Threaded.closeFd(entry.value_ptr.*);
         allocator.free(entry.key_ptr.*);
     }
     self.file_watches.deinit(allocator);
@@ -104,15 +106,15 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         names.deinit(allocator);
     }
     self.snapshots.deinit(allocator);
-    std.posix.close(self.kq);
+    std.Io.Threaded.closeFd(self.kq);
 }
 
 pub fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} || std.Thread.SpawnError)!void {
     if (self.thread != null) return error.AlreadyArmed;
-    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self, allocator });
+    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ self, self.io, allocator });
 }
 
-fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
+fn thread_fn(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     var events: [64]std.posix.Kevent = undefined;
     while (true) {
         // Block indefinitely until kqueue has events.
@@ -130,7 +132,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             // free it before we finish using it.
             var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             var file_path_len: usize = 0;
-            self.file_watches_mutex.lock();
+            self.file_watches_mutex.lockUncancelable(io);
             var fwit = self.file_watches.iterator();
             while (fwit.next()) |entry| {
                 if (entry.value_ptr.* == fd) {
@@ -139,7 +141,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                     break;
                 }
             }
-            self.file_watches_mutex.unlock();
+            self.file_watches_mutex.unlock(io);
             if (file_path_len > 0) {
                 const fp = file_path_buf[0..file_path_len];
                 if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0)
@@ -154,7 +156,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
             // Same copy-under-lock pattern.
             var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             var dir_path_len: usize = 0;
-            self.watches_mutex.lock();
+            self.watches_mutex.lockUncancelable(io);
             var wit = self.watches.iterator();
             while (wit.next()) |entry| {
                 if (entry.value_ptr.* == fd) {
@@ -163,7 +165,7 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
                     break;
                 }
             }
-            self.watches_mutex.unlock();
+            self.watches_mutex.unlock(io);
             if (dir_path_len == 0) continue;
             const dir_path = dir_path_buf[0..dir_path_len];
             if (ev.fflags & NOTE_DELETE != 0) {
@@ -190,8 +192,8 @@ fn thread_fn(self: *@This(), allocator: std.mem.Allocator) void {
 
 // Scan a directory and diff against the snapshot, emitting created/deleted events.
 fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
 
     // Arena for all temporaries - freed in one shot at the end.
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -202,7 +204,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     var current_files: std.StringHashMapUnmanaged(void) = .empty;
     var current_dirs: std.ArrayListUnmanaged([]u8) = .empty;
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(self.io)) |entry| {
         switch (entry.kind) {
             .file => {
                 const name = try tmp.dupe(u8, entry.name);
@@ -231,9 +233,9 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     // Use a boolean flag rather than errdefer to unlock the mutex.  An errdefer
     // scoped to the whole function would fire again after the explicit unlock below,
     // double-unlocking the mutex (UB) if handler.change() later returns an error.
-    self.snapshots_mutex.lock();
+    self.snapshots_mutex.lockUncancelable(self.io);
     var snapshots_locked = true;
-    defer if (snapshots_locked) self.snapshots_mutex.unlock();
+    defer if (snapshots_locked) self.snapshots_mutex.unlock(self.io);
     {
         for (current_dirs.items) |name| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -281,7 +283,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
         to_delete_owned = true; // ownership transferred; defer will free all items
     }
     snapshots_locked = false;
-    self.snapshots_mutex.unlock();
+    self.snapshots_mutex.unlock(self.io);
 
     // Emit all events outside the lock so handlers may safely call watch()/unwatch().
     // Emit created dirs, then deletions, then creations. Deletions first ensures that
@@ -314,10 +316,10 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
 // scan_dir (e.g. a directory moved into the watched tree) so callers see
 // individual 'created' events for all pre-existing contents.
 fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
     var iter = dir.iterate();
-    while (iter.next() catch return) |entry| {
+    while (iter.next(self.io) catch return) |entry| {
         const ot: ObjectType = switch (entry.kind) {
             .file => .file,
             .directory => .dir,
@@ -338,9 +340,9 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
 }
 
 fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
-    self.file_watches_mutex.lock();
+    self.file_watches_mutex.lockUncancelable(self.io);
     const already = self.file_watches.contains(path);
-    self.file_watches_mutex.unlock();
+    self.file_watches_mutex.unlock(self.io);
     if (already) return;
     const fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return;
     const kev = std.posix.Kevent{
@@ -352,43 +354,43 @@ fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []con
         .udata = 0,
     };
     _ = std.posix.kevent(self.kq, &.{kev}, &.{}, null) catch {
-        std.posix.close(fd);
+        std.Io.Threaded.closeFd(fd);
         return;
     };
     const owned = allocator.dupe(u8, path) catch {
-        std.posix.close(fd);
+        std.Io.Threaded.closeFd(fd);
         return;
     };
-    self.file_watches_mutex.lock();
+    self.file_watches_mutex.lockUncancelable(self.io);
     if (self.file_watches.contains(path)) {
-        self.file_watches_mutex.unlock();
-        std.posix.close(fd);
+        self.file_watches_mutex.unlock(self.io);
+        std.Io.Threaded.closeFd(fd);
         allocator.free(owned);
         return;
     }
     self.file_watches.put(allocator, owned, fd) catch {
-        self.file_watches_mutex.unlock();
-        std.posix.close(fd);
+        self.file_watches_mutex.unlock(self.io);
+        std.Io.Threaded.closeFd(fd);
         allocator.free(owned);
         return;
     };
-    self.file_watches_mutex.unlock();
+    self.file_watches_mutex.unlock(self.io);
 }
 
 fn deregister_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
-    self.file_watches_mutex.lock();
+    self.file_watches_mutex.lockUncancelable(self.io);
     const kv = self.file_watches.fetchRemove(path);
-    self.file_watches_mutex.unlock();
+    self.file_watches_mutex.unlock(self.io);
     if (kv) |entry| {
-        std.posix.close(entry.value);
+        std.Io.Threaded.closeFd(entry.value);
         allocator.free(entry.key);
     }
 }
 
 pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory }!void {
-    self.watches_mutex.lock();
+    self.watches_mutex.lockUncancelable(self.io);
     const already = self.watches.contains(path);
-    self.watches_mutex.unlock();
+    self.watches_mutex.unlock(self.io);
     if (already) return;
     const path_fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
         error.AccessDenied,
@@ -420,7 +422,7 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
             return error.WatchFailed;
         },
     };
-    errdefer std.posix.close(path_fd);
+    errdefer std.Io.Threaded.closeFd(path_fd);
     const kev = std.posix.Kevent{
         .ident = @intCast(path_fd),
         .filter = EVFILT_VNODE,
@@ -441,19 +443,19 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
         },
     };
     const owned_path = try allocator.dupe(u8, path);
-    self.watches_mutex.lock();
+    self.watches_mutex.lockUncancelable(self.io);
     if (self.watches.contains(path)) {
-        self.watches_mutex.unlock();
-        std.posix.close(path_fd);
+        self.watches_mutex.unlock(self.io);
+        std.Io.Threaded.closeFd(path_fd);
         allocator.free(owned_path);
         return;
     }
     self.watches.put(allocator, owned_path, path_fd) catch |e| {
-        self.watches_mutex.unlock();
+        self.watches_mutex.unlock(self.io);
         allocator.free(owned_path);
         return e;
     };
-    self.watches_mutex.unlock();
+    self.watches_mutex.unlock(self.io);
     // Take initial snapshot so first NOTE_WRITE has a baseline to diff against.
     self.take_snapshot(allocator, owned_path) catch |e| switch (e) {
         error.AccessDenied,
@@ -470,8 +472,8 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
 }
 
 fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
     // Collect file names first so we can register file watches without holding the lock.
     var names: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
@@ -479,12 +481,12 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
         names.deinit(allocator);
     }
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(self.io)) |entry| {
         if (entry.kind != .file) continue;
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
-    self.snapshots_mutex.lock();
-    errdefer self.snapshots_mutex.unlock();
+    self.snapshots_mutex.lockUncancelable(self.io);
+    errdefer self.snapshots_mutex.unlock(self.io);
     const gop = try self.snapshots.getOrPut(allocator, dir_path);
     if (!gop.found_existing) {
         // Snapshot outer keys are independently owned so they can be safely
@@ -504,7 +506,7 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
             return e;
         };
     }
-    self.snapshots_mutex.unlock();
+    self.snapshots_mutex.unlock(self.io);
     // Register a kqueue watch for each existing file so writes are detected.
     for (names.items) |name| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -514,16 +516,16 @@ fn take_snapshot(self: *@This(), allocator: std.mem.Allocator, dir_path: []const
 }
 
 pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) void {
-    self.watches_mutex.lock();
+    self.watches_mutex.lockUncancelable(self.io);
     const watches_entry = self.watches.fetchRemove(path);
-    self.watches_mutex.unlock();
+    self.watches_mutex.unlock(self.io);
     if (watches_entry) |entry| {
-        std.posix.close(entry.value);
+        std.Io.Threaded.closeFd(entry.value);
         allocator.free(entry.key);
     }
-    self.snapshots_mutex.lock();
+    self.snapshots_mutex.lockUncancelable(self.io);
     const snap_entry = self.snapshots.fetchRemove(path);
-    self.snapshots_mutex.unlock();
+    self.snapshots_mutex.unlock(self.io);
     if (snap_entry) |entry| {
         allocator.free(entry.key); // independently owned; see take_snapshot/scan_dir
         var names = entry.value;

@@ -12,6 +12,7 @@ pub const emits_rename_for_dirs = false;
 pub const emits_subtree_created_on_movein = true;
 
 handler: *Handler,
+io: std.Io,
 stream: ?*anyopaque, // FSEventStreamRef
 queue: ?*anyopaque, // dispatch_queue_t
 ctx: ?*CallbackContext, // heap-allocated, freed after stream is stopped
@@ -79,6 +80,7 @@ const cf = struct {
 
 const CallbackContext = struct {
     handler: *Handler,
+    io: std.Io,
     // Snapshot of the watched root paths at arm() time, used to filter out
     // spurious events for the root directories themselves that FSEvents
     // sometimes delivers as historical events at stream start.
@@ -86,9 +88,10 @@ const CallbackContext = struct {
     last_event_id: *?u64, // points to FSEvents.last_seen_event_id
 };
 
-pub fn init(handler: *Handler) error{}!@This() {
+pub fn init(io: std.Io, handler: *Handler) error{}!@This() {
     return .{
         .handler = handler,
+        .io = io,
         .stream = null,
         .queue = null,
         .ctx = null,
@@ -168,7 +171,7 @@ pub fn arm(self: *@This(), allocator: std.mem.Allocator) error{ OutOfMemory, Arm
 
     const ctx = try allocator.create(CallbackContext);
     errdefer allocator.destroy(ctx);
-    ctx.* = .{ .handler = self.handler, .watched_roots = roots, .last_event_id = &self.last_seen_event_id };
+    ctx.* = .{ .handler = self.handler, .io = self.io, .watched_roots = roots, .last_event_id = &self.last_seen_event_id };
 
     // FSEventStreamCreate copies the context struct; stack allocation is fine.
     const stream_ctx = FSEventStreamContext{ .version = 0, .info = ctx };
@@ -249,12 +252,12 @@ fn callback(
             // FSEvents fires ItemRenamed for both sides of a rename unpaired.
             // Normalize to created/deleted based on whether the path still exists,
             // so move-in appears as created and move-out as deleted on all platforms.
-            const exists = if (std.fs.accessAbsolute(path, .{})) |_| true else |_| false;
+            const exists = if (std.Io.Dir.accessAbsolute(ctx.io, path, .{})) |_| true else |_| false;
             ctx.handler.change(path, if (exists) .created else .deleted, ot) catch {};
             // If a directory was moved in from outside the watched tree, FSEvents
             // only fires for the directory itself - not for its pre-existing contents.
             // Walk the subtree and emit individual created events for each entry.
-            if (exists and ot == .dir) emit_subtree_created(ctx.handler, path);
+            if (exists and ot == .dir) emit_subtree_created(ctx.handler, ctx.io, path);
             // If a write was coalesced with a move-in, also emit the modify.
             if (exists and flags & kFSEventStreamEventFlagItemModified != 0) {
                 ctx.handler.change(path, .modified, ot) catch {};
@@ -271,11 +274,11 @@ fn callback(
 // Called when a directory is moved into the watched tree: FSEvents fires
 // ItemRenamed only for the directory itself, not for its pre-existing contents.
 // Uses only stack storage so it can be called from the GCD callback thread.
-fn emit_subtree_created(handler: *Handler, dir_path: []const u8) void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn emit_subtree_created(handler: *Handler, io: std.Io, dir_path: []const u8) void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
     var iter = dir.iterate();
-    while (iter.next() catch return) |entry| {
+    while (iter.next(io) catch return) |entry| {
         const ot: ObjectType = switch (entry.kind) {
             .file => .file,
             .directory => .dir,
@@ -284,7 +287,7 @@ fn emit_subtree_created(handler: *Handler, dir_path: []const u8) void {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
         handler.change(full_path, .created, ot) catch {};
-        if (ot == .dir) emit_subtree_created(handler, full_path);
+        if (ot == .dir) emit_subtree_created(handler, io, full_path);
     }
 }
 

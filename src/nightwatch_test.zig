@@ -137,7 +137,7 @@ fn MakeTestHandler(comptime Watcher: type) type {
 
 var temp_dir_counter = std.atomic.Value(u32).init(0);
 
-fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
+fn makeTempDir(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     const n = temp_dir_counter.fetchAdd(1, .monotonic);
     const pid = switch (builtin.os.tag) {
         .linux => std.os.linux.getpid(),
@@ -151,12 +151,13 @@ fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
         break :blk try std.fmt.allocPrint(allocator, "{s}\\nightwatch_test_{d}_{d}", .{ tmp_dir, pid, n });
     } else try std.fmt.allocPrint(allocator, "/tmp/nightwatch_test_{d}_{d}", .{ pid, n });
     errdefer allocator.free(name);
-    try std.fs.makeDirAbsolute(name);
+    try std.Io.Dir.createDirAbsolute(io, name, .default_dir);
     // On macOS /tmp is a symlink to /private/tmp; FSEvents always delivers
     // canonical paths, so resolve now so all test-constructed paths match.
     if (builtin.os.tag == .macos) {
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const real = std.fs.realpath(name, &real_buf) catch return name;
+        const real_len = std.Io.Dir.realPathFileAbsolute(io, name, &real_buf) catch return name;
+        const real = real_buf[0..real_len];
         if (!std.mem.eql(u8, name, real)) {
             const canon = try allocator.dupe(u8, real);
             allocator.free(name);
@@ -166,16 +167,16 @@ fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
     return name;
 }
 
-fn removeTempDir(path: []const u8) void {
-    std.fs.deleteTreeAbsolute(path) catch {};
+fn removeTempDir(io: std.Io, path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(io, path) catch {};
 }
 
 /// Drive event delivery for any Watcher variant.
-fn drainEvents(comptime Watcher: type, watcher: *Watcher) !void {
+fn drainEvents(comptime Watcher: type, io: std.Io, watcher: *Watcher) !void {
     if (comptime Watcher.interface_type == .polling) {
         try watcher.handle_read_ready();
     } else {
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(300), .awake);
     }
 }
 
@@ -183,41 +184,41 @@ fn drainEvents(comptime Watcher: type, watcher: *Watcher) !void {
 // Individual test case functions, each parametrized on the Watcher type.
 // ---------------------------------------------------------------------------
 
-fn testCreateFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testCreateFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "hello.txt" });
     defer allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        f.close(io);
     }
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expect(th.hasChange(file_path, .created, .file));
 }
 
-fn testModifyFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testModifyFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -227,37 +228,37 @@ fn testModifyFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "data.txt" });
     defer allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
     // Drain before writing: FSEvents may deliver a coalesced create+modify if the
     // file was created just before the stream started. A drain here separates any
     // stale creation event from the upcoming write, so the write arrives in its
     // own callback with only ItemModified set.
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
     {
-        const f = try std.fs.openFileAbsolute(file_path, .{ .mode = .write_only });
-        defer f.close();
-        try f.writeAll("hello nightwatch\n");
+        const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{ .mode = .write_only });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "hello nightwatch\n");
     }
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expect(th.hasChange(file_path, .modified, .file));
 }
 
-fn testCloseFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testCloseFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     if (comptime !Watcher.emits_close_events) return error.SkipZigTest;
 
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -267,31 +268,31 @@ fn testCloseFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "data.txt" });
     defer allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
     {
-        const f = try std.fs.openFileAbsolute(file_path, .{ .mode = .write_only });
-        defer f.close();
-        try f.writeAll("hello nightwatch\n");
+        const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{ .mode = .write_only });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "hello nightwatch\n");
     }
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expect(th.hasChange(file_path, .modified, .file));
     try std.testing.expect(th.hasChange(file_path, .closed, .file));
 }
 
-fn testDeleteFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testDeleteFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -301,52 +302,52 @@ fn testDeleteFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "gone.txt" });
     defer allocator.free(file_path);
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        f.close(io);
     }
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
-    try std.fs.deleteFileAbsolute(file_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.deleteFileAbsolute(io, file_path);
+    try drainEvents(Watcher, io, &watcher);
 
     try std.testing.expect(th.hasChange(file_path, .deleted, .file));
 }
 
-fn testCreateSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testCreateSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
     const dir_path = try std.fs.path.join(allocator, &.{ tmp, "subdir" });
     defer allocator.free(dir_path);
-    try std.fs.makeDirAbsolute(dir_path);
+    try std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir);
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expect(th.hasChange(dir_path, .created, .dir));
 }
 
-fn testDeleteSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testDeleteSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -355,27 +356,26 @@ fn testDeleteSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void 
 
     const dir_path = try std.fs.path.join(allocator, &.{ tmp, "subdir" });
     defer allocator.free(dir_path);
-    try std.fs.makeDirAbsolute(dir_path);
+    try std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir);
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
-    try std.fs.deleteDirAbsolute(dir_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.deleteDirAbsolute(io, dir_path);
+    try drainEvents(Watcher, io, &watcher);
 
     try std.testing.expect(th.hasChange(dir_path, .deleted, .dir));
 }
 
-
-fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testRenameFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -388,16 +388,16 @@ fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     defer allocator.free(dst_path);
 
     {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_path, .{});
+        f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     if (comptime Watcher.emits_rename_for_files) {
         // INotify/Windows: paired atomic rename callback.
@@ -409,12 +409,12 @@ fn testRenameFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     }
 }
 
-fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testRenameDir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -426,14 +426,14 @@ fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const dst_path = try std.fs.path.join(allocator, &.{ tmp, "after" });
     defer allocator.free(dst_path);
 
-    try std.fs.makeDirAbsolute(src_path);
+    try std.Io.Dir.createDirAbsolute(io, src_path, .default_dir);
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     if (comptime Watcher.emits_rename_for_dirs) {
         // INotify/Windows: paired rename callback.
@@ -444,61 +444,61 @@ fn testRenameDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     }
 }
 
-fn testUnwatchedDir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testUnwatchedDir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const watched = try makeTempDir(allocator);
+    const watched = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(watched);
+        removeTempDir(io, watched);
         allocator.free(watched);
     }
-    const unwatched = try makeTempDir(allocator);
+    const unwatched = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(unwatched);
+        removeTempDir(io, unwatched);
         allocator.free(unwatched);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
     const file_path = try std.fs.path.join(allocator, &.{ unwatched, "silent.txt" });
     defer allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        f.close(io);
     }
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expectEqual(@as(usize, 0), th.events.items.len);
 }
 
-fn testUnwatch(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testUnwatch(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
     const file1 = try std.fs.path.join(allocator, &.{ tmp, "watched.txt" });
     defer allocator.free(file1);
     {
-        const f = try std.fs.createFileAbsolute(file1, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file1, .{});
+        f.close(io);
     }
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
     try std.testing.expect(th.hasChange(file1, .created, .file));
 
     watcher.unwatch(tmp) catch return error.TestUnexpectedResult;
@@ -507,27 +507,27 @@ fn testUnwatch(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     const file2 = try std.fs.path.join(allocator, &.{ tmp, "after_unwatch.txt" });
     defer allocator.free(file2);
     {
-        const f = try std.fs.createFileAbsolute(file2, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, file2, .{});
+        f.close(io);
     }
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
     try std.testing.expectEqual(count_before, th.events.items.len);
 }
 
-fn testMultipleFiles(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testMultipleFiles(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -537,25 +537,24 @@ fn testMultipleFiles(comptime Watcher: type, allocator: std.mem.Allocator) !void
         const name = try std.fmt.allocPrint(allocator, "file{d}.txt", .{i});
         defer allocator.free(name);
         p.* = try std.fs.path.join(allocator, &.{ tmp, name });
-        const f = try std.fs.createFileAbsolute(p.*, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, p.*, .{});
+        f.close(io);
     }
     defer for (paths) |p| allocator.free(p);
 
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
     for (paths) |p| {
         try std.testing.expect(th.hasChange(p, .created, .file));
     }
 }
 
-fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
-
+fn testRenameOrder(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -568,16 +567,16 @@ fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     defer allocator.free(dst_path);
 
     {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_path, .{});
+        f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     // Backends that deliver a paired rename() callback (INotify, Windows) have
     // no two-event ordering to verify - the pair is a single atomic event.
@@ -591,14 +590,14 @@ fn testRenameOrder(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.testing.expect(src_idx < dst_idx);
 }
 
-fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testRenameThenModify(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
 
     const TH = MakeTestHandler(Watcher);
 
-    const tmp = try makeTempDir(allocator);
+    const tmp = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(tmp);
+        removeTempDir(io, tmp);
         allocator.free(tmp);
     }
 
@@ -611,23 +610,23 @@ fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !v
     defer allocator.free(dst_path);
 
     {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_path, .{});
+        f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     {
-        const f = try std.fs.openFileAbsolute(dst_path, .{ .mode = .write_only });
-        defer f.close();
-        try f.writeAll("post-rename content\n");
+        const f = try std.Io.Dir.openFileAbsolute(io, dst_path, .{ .mode = .write_only });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "post-rename content\n");
     }
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
     // Prefer the paired rename event (INotify, Windows); fall back to any
     // event touching src_path for backends that emit separate events.
@@ -642,24 +641,24 @@ fn testRenameThenModify(comptime Watcher: type, allocator: std.mem.Allocator) !v
     try std.testing.expect(rename_idx < modify_idx);
 }
 
-fn testMoveOutFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testMoveOutFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const watched = try makeTempDir(allocator);
+    const watched = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(watched);
+        removeTempDir(io, watched);
         allocator.free(watched);
     }
-    const other = try makeTempDir(allocator);
+    const other = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(other);
+        removeTempDir(io, other);
         allocator.free(other);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -669,13 +668,13 @@ fn testMoveOutFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     defer allocator.free(dst_path);
 
     {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_path, .{});
+        f.close(io);
     }
-    try drainEvents(Watcher, &watcher);
+    try drainEvents(Watcher, io, &watcher);
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     // File moved out of the watched tree: appears as deleted on all platforms.
     try std.testing.expect(th.hasChange(src_path, .deleted, .file));
@@ -683,24 +682,24 @@ fn testMoveOutFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.testing.expect(!th.hasChange(dst_path, .created, .file));
 }
 
-fn testMoveInFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testMoveInFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const watched = try makeTempDir(allocator);
+    const watched = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(watched);
+        removeTempDir(io, watched);
         allocator.free(watched);
     }
-    const other = try makeTempDir(allocator);
+    const other = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(other);
+        removeTempDir(io, other);
         allocator.free(other);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -710,12 +709,12 @@ fn testMoveInFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     defer allocator.free(dst_path);
 
     {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_path, .{});
+        f.close(io);
     }
 
-    try std.fs.renameAbsolute(src_path, dst_path);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_path, dst_path, io);
+    try drainEvents(Watcher, io, &watcher);
 
     // File moved into the watched tree: appears as created.
     try std.testing.expect(th.hasChange(dst_path, .created, .file));
@@ -723,24 +722,24 @@ fn testMoveInFile(comptime Watcher: type, allocator: std.mem.Allocator) !void {
     try std.testing.expect(!th.hasChange(src_path, .deleted, .file));
 }
 
-fn testMoveInSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void {
+fn testMoveInSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
-    const watched = try makeTempDir(allocator);
+    const watched = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(watched);
+        removeTempDir(io, watched);
         allocator.free(watched);
     }
-    const other = try makeTempDir(allocator);
+    const other = try makeTempDir(io, allocator);
     defer {
-        removeTempDir(other);
+        removeTempDir(io, other);
         allocator.free(other);
     }
 
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, &th.handler);
+    var watcher = try Watcher.init(allocator, io, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -754,29 +753,29 @@ fn testMoveInSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void 
     defer allocator.free(dst_file);
 
     // Create subdir with a file in the unwatched root, then move it in.
-    try std.fs.makeDirAbsolute(src_sub);
+    try std.Io.Dir.createDirAbsolute(io, src_sub, .default_dir);
     {
-        const f = try std.fs.createFileAbsolute(src_file, .{});
-        f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, src_file, .{});
+        f.close(io);
     }
-    try std.fs.renameAbsolute(src_sub, dst_sub);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.renameAbsolute(src_sub, dst_sub, io);
+    try drainEvents(Watcher, io, &watcher);
 
     try std.testing.expect(th.hasChange(dst_sub, .created, .dir));
     if (comptime Watcher.emits_subtree_created_on_movein)
         try std.testing.expect(th.hasChange(dst_file, .created, .file));
 
     // Delete the file inside the moved-in subdir.
-    try std.fs.deleteFileAbsolute(dst_file);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.deleteFileAbsolute(io, dst_file);
+    try drainEvents(Watcher, io, &watcher);
 
     // Object type must be .file, not .unknown - backend must have seeded
     // the path_types cache when the subdir was moved in.
     try std.testing.expect(th.hasChange(dst_file, .deleted, .file));
 
     // Delete the now-empty subdir.
-    try std.fs.deleteDirAbsolute(dst_sub);
-    try drainEvents(Watcher, &watcher);
+    try std.Io.Dir.deleteDirAbsolute(io, dst_sub);
+    try drainEvents(Watcher, io, &watcher);
 
     try std.testing.expect(th.hasChange(dst_sub, .deleted, .dir));
 }
@@ -787,13 +786,13 @@ fn testMoveInSubdir(comptime Watcher: type, allocator: std.mem.Allocator) !void 
 
 test "creating a file emits a 'created' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testCreateFile(nw.Create(variant), std.testing.allocator);
+        try testCreateFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "writing to a file emits a 'modified' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        testModifyFile(nw.Create(variant), std.testing.allocator) catch |e| {
+        testModifyFile(nw.Create(variant), std.testing.io, std.testing.allocator) catch |e| {
             if (e != error.SkipZigTest) return e;
         };
     }
@@ -801,67 +800,67 @@ test "writing to a file emits a 'modified' event" {
 
 test "closing a file after writing emits a 'closed' event (inotify only)" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testCloseFile(nw.Create(variant), std.testing.allocator);
+        try testCloseFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "deleting a file emits a 'deleted' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testDeleteFile(nw.Create(variant), std.testing.allocator);
+        try testDeleteFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "deleting a dir emits a 'deleted' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testDeleteSubdir(nw.Create(variant), std.testing.allocator);
+        try testDeleteSubdir(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "creating a sub-directory emits a 'created' event with object_type dir" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testCreateSubdir(nw.Create(variant), std.testing.allocator);
+        try testCreateSubdir(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "renaming a file is reported correctly per-platform" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testRenameFile(nw.Create(variant), std.testing.allocator);
+        try testRenameFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "renaming a directory emits a deleted event for the old path" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testRenameDir(nw.Create(variant), std.testing.allocator);
+        try testRenameDir(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "an unwatched directory produces no events" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testUnwatchedDir(nw.Create(variant), std.testing.allocator);
+        try testUnwatchedDir(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "unwatch stops delivering events for that directory" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testUnwatch(nw.Create(variant), std.testing.allocator);
+        try testUnwatch(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "multiple files created sequentially all appear in the event list" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testMultipleFiles(nw.Create(variant), std.testing.allocator);
+        try testMultipleFiles(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "rename: old-name event precedes new-name event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testRenameOrder(nw.Create(variant), std.testing.allocator);
+        try testRenameOrder(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "rename-then-modify: rename event precedes the subsequent modify event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        testRenameThenModify(nw.Create(variant), std.testing.allocator) catch |e| {
+        testRenameThenModify(nw.Create(variant), std.testing.io, std.testing.allocator) catch |e| {
             if (e != error.SkipZigTest) return e;
         };
     }
@@ -869,18 +868,18 @@ test "rename-then-modify: rename event precedes the subsequent modify event" {
 
 test "moving a file out of the watched tree appears as deleted or renamed" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testMoveOutFile(nw.Create(variant), std.testing.allocator);
+        try testMoveOutFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "moving a file into the watched tree appears as created" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testMoveInFile(nw.Create(variant), std.testing.allocator);
+        try testMoveInFile(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 
 test "moving a subdir into the watched tree: contents can be deleted with correct types" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
-        try testMoveInSubdir(nw.Create(variant), std.testing.allocator);
+        try testMoveInSubdir(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }

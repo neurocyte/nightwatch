@@ -23,7 +23,7 @@ in **Zig**.
 It provides:
 
 - A standalone CLI for tracking filesystem changes
-- A module for embedding change-tracking into other Zig programs
+- A module for embedding change-tracking into other Zig programs (zig-0.16 & zig-0.15 supported)
 - Minimal dependencies and consistent, predictable, cross-platform behavior
 
 It does not interfere.
