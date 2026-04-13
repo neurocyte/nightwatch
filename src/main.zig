@@ -236,7 +236,7 @@ pub fn main(init: std.process.Init) !void {
     defer watch_paths.deinit(allocator);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.Io.Dir.cwd().realPath(init.io, &cwd_buf);
+    const cwd_len = try std.Io.Dir.cwd().realPathFile(init.io, ".", &cwd_buf);
     const cwd = cwd_buf[0..cwd_len];
 
     var i: usize = 1;
