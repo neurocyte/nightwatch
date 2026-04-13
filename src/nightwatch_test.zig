@@ -196,7 +196,7 @@ fn testCreateFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -232,7 +232,7 @@ fn testModifyFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
         f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
     // Drain before writing: FSEvents may deliver a coalesced create+modify if the
@@ -272,7 +272,7 @@ fn testCloseFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocato
         f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -302,7 +302,7 @@ fn testDeleteFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
     const file_path = try std.fs.path.join(allocator, &.{ tmp, "gone.txt" });
     defer allocator.free(file_path);
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -330,7 +330,7 @@ fn testCreateSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloc
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -358,7 +358,7 @@ fn testDeleteSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloc
     defer allocator.free(dir_path);
     try std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir);
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -392,7 +392,7 @@ fn testRenameFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
         f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -428,7 +428,7 @@ fn testRenameDir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocato
 
     try std.Io.Dir.createDirAbsolute(io, src_path, .default_dir);
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -461,7 +461,7 @@ fn testUnwatchedDir(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloc
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -488,7 +488,7 @@ fn testUnwatch(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator)
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -527,7 +527,7 @@ fn testMultipleFiles(comptime Watcher: type, io: std.Io, allocator: std.mem.Allo
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -571,7 +571,7 @@ fn testRenameOrder(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloca
         f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -614,7 +614,7 @@ fn testRenameThenModify(comptime Watcher: type, io: std.Io, allocator: std.mem.A
         f.close(io);
     }
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(tmp);
 
@@ -658,7 +658,7 @@ fn testMoveOutFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloca
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -699,7 +699,7 @@ fn testMoveInFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
@@ -739,7 +739,7 @@ fn testMoveInSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Alloc
     const th = try TH.init(allocator);
     defer th.deinit();
 
-    var watcher = try Watcher.init(allocator, io, &th.handler);
+    var watcher = try Watcher.init(io, allocator, &th.handler);
     defer watcher.deinit();
     try watcher.watch(watched);
 
