@@ -91,7 +91,7 @@ const notify_filter: windows.DWORD =
     0x00000010 | // FILE_NOTIFY_CHANGE_LAST_WRITE
     0x00000040; //  FILE_NOTIFY_CHANGE_CREATION
 
-pub fn init(io: std.Io, handler: *Handler) windows.CreateIoCompletionPortError!@This() {
+pub fn init(io: std.Io, handler: *Handler) !@This() {
     const iocp = try windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1);
     return .{ .handler = handler, .io = io, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = std.Io.Mutex.init, .path_types = .empty };
 }
