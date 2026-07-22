@@ -59,7 +59,7 @@ pub fn Create(comptime variant: InterfaceType) type {
 
         pub fn init(io: std.Io, handler: *Handler) !@This() {
             const rc = std.os.linux.inotify_init1(@bitCast(in_flags));
-            if (std.posix.errno(rc) != .SUCCESS) return error.WatchFailed;
+            if (std.os.linux.errno(rc) != .SUCCESS) return error.WatchFailed;
             const inotify_fd: std.posix.fd_t = @intCast(rc);
             errdefer std.Io.Threaded.closeFd(inotify_fd);
             switch (variant) {
@@ -147,7 +147,7 @@ pub fn Create(comptime variant: InterfaceType) type {
             const path_z = try allocator.dupeZ(u8, path);
             defer allocator.free(path_z);
             const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
-            switch (std.posix.errno(wd)) {
+            switch (std.os.linux.errno(wd)) {
                 .SUCCESS => {},
                 else => |e| {
                     std.log.err("nightwatch.add_watch failed: {t}", .{e});
