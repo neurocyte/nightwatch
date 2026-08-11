@@ -145,8 +145,9 @@ fn makeTempDir(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
         else => std.c.getpid(),
     };
     const name = if (builtin.os.tag == .windows) blk: {
-        const tmp_dir = std.process.getEnvVarOwned(allocator, "TEMP") catch
-            try std.process.getEnvVarOwned(allocator, "TMP");
+        const environ: std.process.Environ = .{ .block = .global };
+        const tmp_dir = environ.getAlloc(allocator, "TEMP") catch
+            try environ.getAlloc(allocator, "TMP");
         defer allocator.free(tmp_dir);
         break :blk try std.fmt.allocPrint(allocator, "{s}\\nightwatch_test_{d}_{d}", .{ tmp_dir, pid, n });
     } else try std.fmt.allocPrint(allocator, "/tmp/nightwatch_test_{d}_{d}", .{ pid, n });
