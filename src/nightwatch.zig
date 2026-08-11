@@ -314,7 +314,10 @@ pub fn Create(comptime variant: Variant) type {
                 const sub = std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
                 backend.add_watch(allocator, sub) catch |e| switch (e) {
                     error.NoEntry => continue,
-                    else => |e_| std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ sub, @errorName(e_) }),
+                    else => |e_| {
+                        std.log.err("nightwatch: add_watch failed for {s}: {s}", .{ sub, @errorName(e_) });
+                        continue;
+                    },
                 };
                 recurse_watch(backend, io, allocator, sub);
             }
