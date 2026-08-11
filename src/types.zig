@@ -34,9 +34,11 @@ pub const Error = error{
     /// The user-supplied handler returned `error.HandlerFailed`.
     HandlerFailed,
     OutOfMemory,
-    /// The watch could not be registered (e.g. path does not exist, fd
-    /// limit reached, or the backend rejected the path).
+    /// The watch could not be registered for a reason other than a missing
+    /// path (e.g. fd limit reached, or the backend rejected the path).
     WatchFailed,
+    /// The watch could not be registered because the path does not exist.
+    NoEntry,
 };
 
 /// Selects how the watcher delivers events to the caller.

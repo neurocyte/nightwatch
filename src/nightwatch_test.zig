@@ -318,6 +318,27 @@ fn testDeleteFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocat
     try std.testing.expect(th.hasChange(file_path, .deleted, .file));
 }
 
+fn testWatchNonexistentPath(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
+    const TH = MakeTestHandler(Watcher);
+
+    const tmp = try makeTempDir(io, allocator);
+    defer {
+        removeTempDir(io, tmp);
+        allocator.free(tmp);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    var watcher = try Watcher.init(io, allocator, &th.handler);
+    defer watcher.deinit();
+
+    const missing_path = try std.fs.path.join(allocator, &.{ tmp, "does-not-exist" });
+    defer allocator.free(missing_path);
+
+    try std.testing.expectError(error.NoEntry, watcher.watch(missing_path));
+}
+
 fn testCreateSubdir(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
@@ -813,6 +834,12 @@ test "deleting a file emits a 'deleted' event" {
 test "deleting a dir emits a 'deleted' event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         try testDeleteSubdir(nw.Create(variant), std.testing.io, std.testing.allocator);
+    }
+}
+
+test "watching a nonexistent path returns error.NoEntry" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        try testWatchNonexistentPath(nw.Create(variant), std.testing.io, std.testing.allocator);
     }
 }
 

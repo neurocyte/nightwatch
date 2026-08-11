@@ -343,7 +343,7 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
     }
 }
 
-pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory }!void {
+pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory, NoEntry }!void {
     self.watches_mutex.lockUncancelable(self.io);
     const already = self.watches.contains(path);
     self.watches_mutex.unlock(self.io);
@@ -352,8 +352,13 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     const path_fd: std.posix.fd_t = blk: {
         const raw = std.posix.system.open(&path_z, .{}, @as(c_uint, 0));
         if (raw < 0) {
-            std.log.err("{s} failed: open", .{@src().fn_name});
-            return error.WatchFailed;
+            switch (std.posix.errno(raw)) {
+                .NOENT => return error.NoEntry,
+                else => |e| {
+                    std.log.err("{s} failed: open ({t})", .{ @src().fn_name, e });
+                    return error.WatchFailed;
+                },
+            }
         }
         break :blk @intCast(raw);
     };
