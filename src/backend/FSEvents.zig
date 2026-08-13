@@ -291,6 +291,10 @@ fn emit_subtree_created(handler: *Handler, io: std.Io, dir_path: []const u8) voi
     }
 }
 
+pub fn watch_count(self: *@This()) usize {
+    return self.watches.count();
+}
+
 pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ WatchFailed, OutOfMemory, NoEntry }!void {
     if (self.watches.contains(path)) return;
     // FSEventStreamCreate does not itself fail for a path that doesn't

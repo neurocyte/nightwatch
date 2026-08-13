@@ -153,13 +153,14 @@ fn usage(io: std.Io, out: std.Io.File) !void {
     var buf: [4096]u8 = undefined;
     var writer = std.Io.File.writer(out, io, &buf);
     try writer.interface.print(
-        \\Usage: nightwatch [--ignore <path>]... <path> [<path> ...]
+        \\Usage: nightwatch [--ignore <path>]... [--show-count] <path> [<path> ...]
         \\
         \\The Watch never sleeps.
         \\
         \\Options:
         \\  --ignore <path>   Suppress events whose path exactly matches <path>.
         \\                    May be specified multiple times.
+        \\  --show-count      Print the number of registered watches on exit.
         \\
         \\Events printed to stdout (columns: event  type  path):
         \\  create    a file or directory was created
@@ -234,6 +235,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var watch_paths = std.ArrayListUnmanaged([]const u8).empty;
     defer watch_paths.deinit(allocator);
+    var show_count = false;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.Io.Dir.cwd().realPathFile(init.io, ".", &cwd_buf);
@@ -253,6 +255,8 @@ pub fn main(init: std.process.Init) !void {
             else
                 try std.fs.path.join(allocator, &.{ cwd, raw });
             try ignore_list.append(allocator, abs);
+        } else if (std.mem.eql(u8, args[i], "--show-count")) {
+            show_count = true;
         } else {
             try watch_paths.append(allocator, args[i]);
         }
@@ -295,10 +299,18 @@ pub fn main(init: std.process.Init) !void {
     defer watcher.deinit();
 
     for (watch_paths.items) |path| {
-        watcher.watch(path) catch |err| {
-            try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
-            continue;
+        const before = watcher.watch_count();
+        watcher.watch(path) catch |err| switch (err) {
+            error.WatchLimitReached => try stderr.interface.print(
+                "nightwatch: {s}: watch limit reached, holding {d} watches\n",
+                .{ path, watcher.watch_count() },
+            ),
+            else => {
+                try stderr.interface.print("nightwatch: {s}: {s}\n", .{ path, @errorName(err) });
+                continue;
+            },
         };
+        if (watcher.watch_count() == before) continue;
         (std.Io.Terminal{ .writer = &stdout.interface, .mode = tty_mode }).setColor(.dim) catch {};
         try stdout.interface.print("# on watch: {s}", .{path});
         (std.Io.Terminal{ .writer = &stdout.interface, .mode = tty_mode }).setColor(.reset) catch {};
@@ -312,5 +324,10 @@ pub fn main(init: std.process.Init) !void {
         run_windows(init.io);
     } else if (is_posix) {
         run_posix();
+    }
+
+    if (show_count) {
+        try stdout.interface.print("# watches: {d}\n", .{watcher.watch_count()});
+        try stdout.flush();
     }
 }

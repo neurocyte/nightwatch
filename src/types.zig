@@ -35,10 +35,18 @@ pub const Error = error{
     HandlerFailed,
     OutOfMemory,
     /// The watch could not be registered for a reason other than a missing
-    /// path (e.g. fd limit reached, or the backend rejected the path).
+    /// path (e.g. the backend rejected the path).
     WatchFailed,
     /// The watch could not be registered because the path does not exist.
     NoEntry,
+    /// The OS refused the watch because a resource limit was reached:
+    /// ENOSPC from inotify_add_watch (fs.inotify.max_user_watches), or
+    /// EMFILE/ENFILE opening a kqueue descriptor (RLIMIT_NOFILE).
+    ///
+    /// Recursive enumeration stops when this is hit rather than retrying every
+    /// remaining path, so a `watch()` returning it has registered only part of
+    /// the tree. `watch_count()` reports how much.
+    WatchLimitReached,
 };
 
 /// Selects how the watcher delivers events to the caller.

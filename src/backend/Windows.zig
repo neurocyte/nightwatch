@@ -335,6 +335,12 @@ fn thread_fn(
     }
 }
 
+pub fn watch_count(self: *@This()) usize {
+    self.watches_mutex.lockUncancelable(self.io);
+    defer self.watches_mutex.unlock(self.io);
+    return self.watches.count();
+}
+
 pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed, NoEntry }!void {
     self.watches_mutex.lockUncancelable(self.io);
     defer self.watches_mutex.unlock(self.io);

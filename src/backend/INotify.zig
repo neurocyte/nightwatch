@@ -25,6 +25,7 @@ pub fn Create(comptime variant: InterfaceType) type {
             .polling => void,
         },
         pending_renames: std.ArrayList(PendingRename),
+        limit_logged: std.atomic.Value(bool),
         stop_pipe: switch (variant) {
             .threaded => [2]std.posix.fd_t,
             .polling => void,
@@ -72,6 +73,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                         .watches = .empty,
                         .watches_mutex = std.Io.Mutex.init,
                         .pending_renames = .empty,
+                        .limit_logged = .init(false),
                         .stop_pipe = stop_pipe,
                         .thread = null,
                     };
@@ -84,6 +86,7 @@ pub fn Create(comptime variant: InterfaceType) type {
                         .watches = .empty,
                         .watches_mutex = {},
                         .pending_renames = .empty,
+                        .limit_logged = .init(false),
                         .stop_pipe = {},
                         .thread = {},
                     };
@@ -143,13 +146,14 @@ pub fn Create(comptime variant: InterfaceType) type {
             }
         }
 
-        pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed, NoEntry }!void {
+        pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed, NoEntry, WatchLimitReached }!void {
             const path_z = try allocator.dupeZ(u8, path);
             defer allocator.free(path_z);
             const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
             switch (std.os.linux.errno(wd)) {
                 .SUCCESS => {},
                 .NOENT => return error.NoEntry,
+                .NOSPC => return error.WatchLimitReached,
                 else => |e| {
                     std.log.err("nightwatch.add_watch failed: {t}", .{e});
                     return error.WatchFailed;
@@ -180,6 +184,17 @@ pub fn Create(comptime variant: InterfaceType) type {
                 self.watches.removeByPtr(entry.key_ptr);
                 return;
             }
+        }
+
+        pub fn watch_count(self: *@This()) usize {
+            if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+            defer if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
+            return self.watches.count();
+        }
+
+        pub fn note_watch_limit(self: *@This(), path: []const u8) void {
+            if (self.limit_logged.swap(true, .monotonic)) return;
+            std.log.err("nightwatch: watch limit reached at {s} after {d} watches; not watching further paths", .{ path, self.watch_count() });
         }
 
         fn has_watch_for_path(self: *@This(), path: []const u8) bool {
