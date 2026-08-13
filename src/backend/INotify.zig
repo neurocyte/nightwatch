@@ -24,7 +24,7 @@ pub fn Create(comptime variant: InterfaceType) type {
             .threaded => std.Io.Mutex,
             .polling => void,
         },
-        pending_renames: std.ArrayListUnmanaged(PendingRename),
+        pending_renames: std.ArrayList(PendingRename),
         stop_pipe: switch (variant) {
             .threaded => [2]std.posix.fd_t,
             .polling => void,
@@ -249,10 +249,20 @@ pub fn Create(comptime variant: InterfaceType) type {
             var buf: [65536]u8 align(@alignOf(InotifyEvent)) = undefined;
             // Src paths for which we already emitted a paired atomic rename this
             // read, so IN_MOVE_SELF for the same inode can be suppressed.
-            var paired_src_paths: std.ArrayListUnmanaged([]u8) = .empty;
+            var paired_src_paths: std.ArrayList([]u8) = .empty;
             defer {
                 for (paired_src_paths.items) |p| allocator.free(p);
                 paired_src_paths.deinit(allocator);
+            }
+            // wds seen with IN_IGNORED this call, purged from `watches` later.
+            var to_purge: std.ArrayList(i32) = .empty;
+            defer {
+                if (comptime variant == .threaded) self.watches_mutex.lockUncancelable(self.io);
+                for (to_purge.items) |wd| {
+                    if (self.watches.fetchRemove(wd)) |kv| allocator.free(kv.value.path);
+                }
+                if (comptime variant == .threaded) self.watches_mutex.unlock(self.io);
+                to_purge.deinit(allocator);
             }
             defer {
                 // Any unpaired MOVED_FROM means the file was moved out of the watched tree.
@@ -277,6 +287,12 @@ pub fn Create(comptime variant: InterfaceType) type {
                     const ev: *const InotifyEvent = @ptrCast(@alignCast(buf[offset..].ptr));
                     const name_offset = offset + @sizeOf(InotifyEvent);
                     offset = name_offset + ev.len;
+
+                    if (ev.mask & IN.IGNORED != 0) {
+                        // The watch was removed kernel-side.
+                        to_purge.append(allocator, ev.wd) catch {};
+                        continue;
+                    }
 
                     // Copy the watched path under the lock so a concurrent remove_watch
                     // cannot free the slice while we are still reading from it.
