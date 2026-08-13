@@ -120,6 +120,16 @@ pub fn Create(comptime variant: Variant) type {
         pub const emits_rename_for_dirs = Backend.emits_rename_for_dirs;
         pub const emits_subtree_created_on_movein = Backend.emits_subtree_created_on_movein;
 
+        /// Whether `Handler.VTable.should_watch` can actually save resources here.
+        ///
+        /// False for backends that cover a whole subtree with one registration
+        /// (FSEvents, ReadDirectoryChangesW): there is no per-directory watch to
+        /// skip, so the predicate is never consulted.
+        pub const filters_watches: bool = !Backend.watches_recursively;
+        /// Whether this backend registers a watch per file as well as per
+        /// directory. When true the predicate is asked about files too.
+        pub const watches_files: bool = Backend.watches_files;
+
         /// Create a new watcher.
         ///
         /// `handler` must remain valid for the lifetime of the watcher. For
@@ -248,11 +258,18 @@ pub fn Create(comptime variant: Variant) type {
             const vtable = Handler.VTable{
                 .change = change_cb,
                 .rename = rename_cb,
+                .should_watch = should_watch_cb,
             };
+
+            fn should_watch_cb(h: *Handler, path: []const u8, object_type: ObjectType) bool {
+                const self: *Interceptor = @fieldParentPtr("handler", h);
+                return self.user_handler.should_watch(path, object_type);
+            }
 
             fn change_cb(h: *Handler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
                 const self: *Interceptor = @fieldParentPtr("handler", h);
                 if (comptime !Backend.watches_recursively) if (event_type == .created and object_type == .dir) blk: {
+                    if (!self.user_handler.should_watch(path, .dir)) break :blk;
                     self.backend.add_watch(self.allocator, path) catch |e| switch (e) {
                         error.NoEntry => break :blk,
                         error.WatchLimitReached => {
@@ -287,13 +304,20 @@ pub fn Create(comptime variant: Variant) type {
                 .change = change_cb,
                 .rename = rename_cb,
                 .wait_readable = wait_readable_cb,
+                .should_watch = should_watch_cb,
             };
+
+            fn should_watch_cb(h: *PollingHandler, path: []const u8, object_type: ObjectType) bool {
+                const self: *PollingInterceptor = @fieldParentPtr("handler", h);
+                return self.user_handler.should_watch(path, object_type);
+            }
 
             const PollingHandler = types.PollingHandler;
 
             fn change_cb(h: *PollingHandler, path: []const u8, event_type: EventType, object_type: ObjectType) error{HandlerFailed}!void {
                 const self: *PollingInterceptor = @fieldParentPtr("handler", h);
                 if (comptime !Backend.watches_recursively) if (event_type == .created and object_type == .dir) blk: {
+                    if (!self.user_handler.should_watch(path, .dir)) break :blk;
                     self.backend.add_watch(self.allocator, path) catch |e| switch (e) {
                         error.NoEntry => break :blk,
                         error.WatchLimitReached => {
@@ -335,6 +359,8 @@ pub fn Create(comptime variant: Variant) type {
                 if (entry.kind != .directory) continue;
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const sub = std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
+                // Skipping a directory skips its whole subtree.
+                if (!backend.handler.should_watch(sub, .dir)) continue;
                 if (comptime builtin.is_test) {
                     if (fault_inject_after) |limit| {
                         if (fault_injected >= limit) return error.WatchLimitReached;

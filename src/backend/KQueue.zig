@@ -5,6 +5,7 @@ const EventType = types.EventType;
 const ObjectType = types.ObjectType;
 
 pub const watches_recursively = false;
+pub const watches_files = true; // one open fd per file as well as per directory
 pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
@@ -302,6 +303,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     // a rename (old disappears, new appears) reports the source path before the dest.
     for (new_dirs.items) |full_path| {
         try self.handler.change(full_path, EventType.created, .dir);
+        if (!self.handler.should_watch(full_path, .dir)) continue;
         // Start watching the moved-in dir so future changes inside it are detected
         // and so its deletion fires NOTE_DELETE rather than being silently missed.
         self.add_watch(allocator, full_path) catch |e| switch (e) {
@@ -345,6 +347,8 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
         if (ot == .file) {
             self.register_file_watch(allocator, full_path) catch self.note_watch_limit(full_path);
         } else {
+            // Skipping a directory skips everything below it too.
+            if (!self.handler.should_watch(full_path, .dir)) continue;
             // Watch nested subdirs so changes inside them are detected after move-in.
             self.add_watch(allocator, full_path) catch |e| switch (e) {
                 error.WatchLimitReached => self.note_watch_limit(full_path),
@@ -356,6 +360,8 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
 }
 
 fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{WatchLimitReached}!void {
+    // Before the lock, so the predicate is never called with one held.
+    if (!self.handler.should_watch(path, .file)) return;
     self.file_watches_mutex.lockUncancelable(self.io);
     const already = self.file_watches.contains(path);
     self.file_watches_mutex.unlock(self.io);

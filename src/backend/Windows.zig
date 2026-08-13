@@ -5,6 +5,7 @@ const EventType = types.EventType;
 const ObjectType = types.ObjectType;
 
 pub const watches_recursively = true; // ReadDirectoryChangesW with bWatchSubtree=1
+pub const watches_files = false;
 pub const detects_file_modifications = true;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = true;

@@ -36,6 +36,7 @@ pub fn Create(comptime variant: InterfaceType) type {
         },
 
         pub const watches_recursively = false;
+        pub const watches_files = false;
         pub const detects_file_modifications = true;
         pub const emits_close_events = true;
         pub const emits_rename_for_files = true;

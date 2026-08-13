@@ -5,6 +5,7 @@ const EventType = types.EventType;
 const ObjectType = types.ObjectType;
 
 pub const watches_recursively = false;
+pub const watches_files = false;
 pub const detects_file_modifications = false;
 pub const emits_close_events = false;
 pub const emits_rename_for_files = false;
@@ -296,6 +297,7 @@ fn scan_dir(self: *@This(), allocator: std.mem.Allocator, dir_path: []const u8) 
     // Order: new dirs, deletions (source before dest for renames), creations, modifications.
     for (new_dirs.items) |full_path| {
         try self.handler.change(full_path, EventType.created, .dir);
+        if (!self.handler.should_watch(full_path, .dir)) continue;
         // Start watching the moved-in dir so future changes inside it are detected
         // and so its deletion fires NOTE_DELETE rather than being silently missed.
         self.add_watch(allocator, full_path) catch |e| switch (e) {
@@ -339,6 +341,8 @@ fn emit_subtree_created(self: *@This(), allocator: std.mem.Allocator, dir_path: 
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
         try self.handler.change(full_path, EventType.created, ot);
         if (ot == .dir) {
+            // Skipping a directory skips everything below it too.
+            if (!self.handler.should_watch(full_path, .dir)) continue;
             // Watch nested subdirs so changes inside them are detected after move-in.
             self.add_watch(allocator, full_path) catch |e| switch (e) {
                 error.WatchLimitReached => self.note_watch_limit(full_path),

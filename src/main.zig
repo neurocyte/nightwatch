@@ -33,18 +33,28 @@ const CliHandler = struct {
             .change = change_cb,
             .rename = rename_cb,
             .wait_readable = wait_readable_cb,
+            .should_watch = should_watch_cb,
         },
         .threaded => .{
             .change = change_cb,
             .rename = rename_cb,
+            .should_watch = should_watch_cb,
         },
     };
 
-    fn change_cb(h: *Watcher.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
+    /// --ignore: do not watch this path, or anything below it.
+    fn should_watch_cb(h: *Watcher.Handler, path: []const u8, _: nightwatch.ObjectType) bool {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         for (self.ignore) |ignored| {
-            if (std.mem.eql(u8, path, ignored)) return;
+            if (!std.mem.startsWith(u8, path, ignored)) continue;
+            if (path.len == ignored.len) return false;
+            if (path[ignored.len] == std.fs.path.sep) return false;
         }
+        return true;
+    }
+
+    fn change_cb(h: *Watcher.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
+        const self: *CliHandler = @fieldParentPtr("handler", h);
         var buf: [4096]u8 = undefined;
         var w = std.Io.File.writer(self.out, self.io, &buf);
         defer w.flush() catch {};
@@ -71,9 +81,6 @@ const CliHandler = struct {
 
     fn rename_cb(h: *Watcher.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
-        for (self.ignore) |ignored| {
-            if (std.mem.eql(u8, src, ignored) or std.mem.eql(u8, dst, ignored)) return;
-        }
         var buf: [4096]u8 = undefined;
         var w = std.Io.File.writer(self.out, self.io, &buf);
         defer w.flush() catch {};
@@ -158,8 +165,7 @@ fn usage(io: std.Io, out: std.Io.File) !void {
         \\The Watch never sleeps.
         \\
         \\Options:
-        \\  --ignore <path>   Suppress events whose path exactly matches <path>.
-        \\                    May be specified multiple times.
+        \\  --ignore <path>   Do not watch <path> or anything below it. May be specified multiple times.
         \\  --show-count      Print the number of registered watches on exit.
         \\
         \\Events printed to stdout (columns: event  type  path):
