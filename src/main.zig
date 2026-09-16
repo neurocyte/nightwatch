@@ -56,7 +56,7 @@ const CliHandler = struct {
     fn change_cb(h: *Watcher.Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         var buf: [4096]u8 = undefined;
-        var w = std.Io.File.writer(self.out, self.io, &buf);
+        var w = std.Io.File.writerStreaming(self.out, self.io, &buf);
         defer w.flush() catch {};
         const color: std.Io.Terminal.Color = switch (event_type) {
             .created => .green,
@@ -82,7 +82,7 @@ const CliHandler = struct {
     fn rename_cb(h: *Watcher.Handler, src: []const u8, dst: []const u8, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
         const self: *CliHandler = @fieldParentPtr("handler", h);
         var buf: [4096]u8 = undefined;
-        var w = std.Io.File.writer(self.out, self.io, &buf);
+        var w = std.Io.File.writerStreaming(self.out, self.io, &buf);
         defer w.flush() catch {};
         const tty = std.Io.Terminal{ .writer = &w.interface, .mode = self.tty_mode };
         tty.setColor(.magenta) catch return error.HandlerFailed;
@@ -158,7 +158,7 @@ fn run_windows(io: std.Io) void {
 
 fn usage(io: std.Io, out: std.Io.File) !void {
     var buf: [4096]u8 = undefined;
-    var writer = std.Io.File.writer(out, io, &buf);
+    var writer = std.Io.File.writerStreaming(out, io, &buf);
     try writer.interface.print(
         \\Usage: nightwatch [--ignore <path>]... [--show-count] <path> [<path> ...]
         \\
@@ -185,7 +185,7 @@ fn usage(io: std.Io, out: std.Io.File) !void {
 
 fn version(io: std.Io, out: std.Io.File) !void {
     var buf: [4096]u8 = undefined;
-    var writer = std.Io.File.writer(out, io, &buf);
+    var writer = std.Io.File.writerStreaming(out, io, &buf);
     try writer.interface.print(
         \\nightwatch version {s}
         \\using: {s}
@@ -225,10 +225,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var buf: [4096]u8 = undefined;
-    var stderr = std.Io.File.writer(std.Io.File.stderr(), init.io, &buf);
+    var stderr = std.Io.File.writerStreaming(std.Io.File.stderr(), init.io, &buf);
     defer stderr.flush() catch {};
     var out_buf: [4096]u8 = undefined;
-    var stdout = std.Io.File.writer(std.Io.File.stdout(), init.io, &out_buf);
+    var stdout = std.Io.File.writerStreaming(std.Io.File.stdout(), init.io, &out_buf);
     defer stdout.flush() catch {};
 
     // Parse --ignore options and watch paths.
