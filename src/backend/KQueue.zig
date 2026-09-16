@@ -157,6 +157,16 @@ fn thread_fn(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
             self.file_watches_mutex.unlock(io);
             if (file_path_len > 0) {
                 const fp = file_path_buf[0..file_path_len];
+                if (ev.fflags & (NOTE_DELETE | NOTE_RENAME) != 0) {
+                    self.deregister_file_watch(allocator, fp);
+                    std.Io.Dir.accessAbsolute(io, fp, .{}) catch continue;
+                    self.register_file_watch(allocator, fp) catch self.note_watch_limit(fp);
+                    self.handler.change(fp, EventType.modified, .file) catch |e| {
+                        std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                        return;
+                    };
+                    continue;
+                }
                 if (ev.fflags & (NOTE_WRITE | NOTE_EXTEND) != 0)
                     self.handler.change(fp, EventType.modified, .file) catch |e| {
                         std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
@@ -379,7 +389,7 @@ fn register_file_watch(self: *@This(), allocator: std.mem.Allocator, path: []con
         .ident = @intCast(fd),
         .filter = EVFILT_VNODE,
         .flags = EV_ADD | EV_ENABLE | EV_CLEAR,
-        .fflags = NOTE_WRITE | NOTE_EXTEND,
+        .fflags = NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME,
         .data = 0,
         .udata = 0,
     };

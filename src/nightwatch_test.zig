@@ -671,6 +671,62 @@ fn testRenameThenModify(comptime Watcher: type, io: std.Io, allocator: std.mem.A
     try std.testing.expect(rename_idx < modify_idx);
 }
 
+fn testReplaceThenModify(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
+    if (comptime !Watcher.detects_file_modifications) return error.SkipZigTest;
+
+    const TH = MakeTestHandler(Watcher);
+
+    const tmp = try makeTempDir(io, allocator);
+    defer {
+        removeTempDir(io, tmp);
+        allocator.free(tmp);
+    }
+
+    const th = try TH.init(allocator);
+    defer th.deinit();
+
+    const file_path = try std.fs.path.join(allocator, &.{ tmp, "file.txt" });
+    defer allocator.free(file_path);
+    const tmp_path = try std.fs.path.join(allocator, &.{ tmp, "file.txt.tmp" });
+    defer allocator.free(tmp_path);
+
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "original\n");
+    }
+
+    var watcher = try Watcher.init(io, allocator, &th.handler);
+    defer watcher.deinit();
+    try watchOrSkip(Watcher, &watcher, tmp);
+
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "replaced\n");
+    }
+    try std.Io.Dir.renameAbsolute(tmp_path, file_path, io);
+    try drainEvents(Watcher, io, &watcher);
+
+    _ = th.indexOfRename(tmp_path, file_path) orelse
+        th.indexOfAnyPath(file_path) orelse
+        return error.MissingReplaceEvent;
+    const after_replace = th.events.items.len;
+
+    {
+        const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{ .mode = .write_only });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "modified after replace\n");
+    }
+    try drainEvents(Watcher, io, &watcher);
+
+    for (th.events.items[after_replace..]) |event| switch (event) {
+        .change => |c| if (c.event_type == .modified and std.mem.eql(u8, c.path, file_path)) return,
+        else => {},
+    };
+    return error.MissingModifyAfterReplace;
+}
+
 fn testMoveOutFile(comptime Watcher: type, io: std.Io, allocator: std.mem.Allocator) !void {
     const TH = MakeTestHandler(Watcher);
 
@@ -1117,6 +1173,14 @@ test "rename: old-name event precedes new-name event" {
 test "rename-then-modify: rename event precedes the subsequent modify event" {
     inline for (comptime std.enums.values(nw.Variant)) |variant| {
         testRenameThenModify(nw.Create(variant), std.testing.io, std.testing.allocator) catch |e| {
+            if (e != error.SkipZigTest) return e;
+        };
+    }
+}
+
+test "replacing a watched file by rename keeps reporting changes to it" {
+    inline for (comptime std.enums.values(nw.Variant)) |variant| {
+        testReplaceThenModify(nw.Create(variant), std.testing.io, std.testing.allocator) catch |e| {
             if (e != error.SkipZigTest) return e;
         };
     }
