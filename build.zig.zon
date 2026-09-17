@@ -2,7 +2,7 @@
     .name = .nightwatch,
     .version = "1.0.0",
     .fingerprint = 0xb88932861fde7cb9,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.2122+3e15e99e6",
     .dependencies = .{
         .@"xcode-frameworks" = .{
             .url = "git+https://code.hexops.org/hexops/xcode-frameworks?ref=main#8a1cfb373587ea4c9bb1468b7c986462d8d4e10e",

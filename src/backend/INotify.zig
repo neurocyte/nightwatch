@@ -148,7 +148,7 @@ pub fn Create(comptime variant: InterfaceType) type {
         }
 
         pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8) error{ OutOfMemory, WatchFailed, NoEntry, WatchLimitReached }!void {
-            const path_z = try allocator.dupeZ(u8, path);
+            const path_z = try allocator.dupeSentinel(u8, path, 0);
             defer allocator.free(path_z);
             const wd = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, watch_mask);
             switch (std.os.linux.errno(wd)) {

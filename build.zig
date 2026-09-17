@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
     var version: std.Io.Writer.Allocating = .init(b.allocator);
     defer version.deinit();
     gen_version(b, &version.writer) catch |e| {
-        if (b.release_mode != .off)
+        if (b.graph.release_mode != .off)
             std.debug.panic("gen_version failed: {any}", .{e});
         version.writer.writeAll("unknown") catch {};
     };
@@ -65,8 +65,6 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args|
-        run_cmd.addArgs(args);
 
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
