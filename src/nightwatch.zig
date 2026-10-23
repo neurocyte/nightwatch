@@ -182,7 +182,7 @@ pub fn Create(comptime variant: Variant) type {
                 path
             else blk: {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd_len = std.Io.Dir.cwd().realPath(self.io, &cwd_buf) catch return error.WatchFailed;
+                const cwd_len = std.process.currentPath(self.io, &cwd_buf) catch return error.WatchFailed;
                 const cwd = cwd_buf[0..cwd_len];
                 break :blk std.fmt.bufPrint(&buf, "{s}{c}{s}", .{ cwd, std.fs.path.sep, path }) catch return error.WatchFailed;
             };
