@@ -81,6 +81,7 @@ thread: ?std.Thread,
 watches: std.StringHashMapUnmanaged(*Watch),
 watches_mutex: std.Io.Mutex,
 path_types: std.StringHashMapUnmanaged(ObjectType),
+retired: std.ArrayList(*Watch),
 
 // A completion key of zero is used to signal the background thread to exit.
 const SHUTDOWN_KEY: windows.ULONG_PTR = 0;
@@ -90,6 +91,18 @@ const Watch = struct {
     buf: Buf,
     overlapped: OVERLAPPED,
     path: []u8, // owned
+    removed: bool = false,
+
+    fn arm(self: *Watch) bool {
+        self.overlapped = std.mem.zeroes(OVERLAPPED);
+        return win32.ReadDirectoryChangesW(self.handle, self.buf.ptr, buf_size, .TRUE, notify_filter, null, &self.overlapped, null) != .FALSE;
+    }
+
+    fn destroy(self: *Watch, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.buf);
+        allocator.destroy(self);
+    }
 };
 
 const buf_size = 65536;
@@ -117,7 +130,7 @@ const notify_filter: windows.DWORD =
 
 pub fn init(io: std.Io, handler: *Handler) !@This() {
     const iocp = win32.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1) orelse return error.SystemResources;
-    return .{ .handler = handler, .io = io, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = std.Io.Mutex.init, .path_types = .empty };
+    return .{ .handler = handler, .io = io, .iocp = iocp, .thread = null, .watches = .empty, .watches_mutex = std.Io.Mutex.init, .path_types = .empty, .retired = .empty };
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -128,11 +141,11 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     while (it.next()) |entry| {
         const w = entry.value_ptr.*;
         _ = win32.CloseHandle(w.handle);
-        allocator.free(w.path);
-        allocator.free(w.buf);
-        allocator.destroy(w);
+        w.destroy(allocator);
     }
     self.watches.deinit(allocator);
+    for (self.retired.items) |w| w.destroy(allocator);
+    self.retired.deinit(allocator);
     var pt_it = self.path_types.iterator();
     while (pt_it.next()) |entry| allocator.free(entry.key_ptr.*);
     self.path_types.deinit(allocator);
@@ -141,7 +154,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
 
 pub fn arm(self: *@This(), allocator: std.mem.Allocator) (error{AlreadyArmed} || std.Thread.SpawnError)!void {
     if (self.thread != null) return error.AlreadyArmed;
-    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ allocator, self.io, self.iocp, &self.watches, &self.watches_mutex, &self.path_types, self.handler });
+    self.thread = try std.Thread.spawn(.{}, thread_fn, .{ allocator, self.io, self.iocp, &self.watches, &self.watches_mutex, &self.path_types, &self.retired, self.handler });
 }
 
 fn thread_fn(
@@ -151,6 +164,7 @@ fn thread_fn(
     watches: *std.StringHashMapUnmanaged(*Watch),
     watches_mutex: *std.Io.Mutex,
     path_types: *std.StringHashMapUnmanaged(ObjectType),
+    retired: *std.ArrayList(*Watch),
     handler: *Handler,
 ) void {
     var bytes: windows.DWORD = 0;
@@ -159,180 +173,191 @@ fn thread_fn(
     while (true) {
         // Block indefinitely until IOCP has a completion or shutdown signal.
         const ok = win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &overlapped_ptr, INFINITE);
-        if (ok == .FALSE or key == SHUTDOWN_KEY) return;
-        const triggered_handle: windows.HANDLE = @ptrFromInt(key);
+        if (key == SHUTDOWN_KEY) return;
+        const overlapped = overlapped_ptr orelse return; // completion port failed
+        const w: *Watch = @fieldParentPtr("overlapped", overlapped);
         watches_mutex.lockUncancelable(io);
-        var it = watches.iterator();
-        while (it.next()) |entry| {
-            const w = entry.value_ptr.*;
-            if (w.handle != triggered_handle) continue;
-            if (bytes > 0) {
-                var offset: usize = 0;
-                // FILE_ACTION_RENAMED_OLD_NAME is always immediately followed by
-                // FILE_ACTION_RENAMED_NEW_NAME in the same RDCW buffer. Stash the
-                // src path here and emit a single handler.rename(src, dst) on NEW.
-                var pending_rename: ?struct {
-                    path_buf: [std.fs.max_path_bytes]u8,
-                    path_len: usize,
-                    object_type: ObjectType,
-                } = null;
-                while (offset < bytes) {
-                    const info: *FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(w.buf[offset..].ptr));
-                    const name_wchars = (&info.FileName).ptr[0 .. info.FileNameLength / 2];
-                    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const name_len = std.unicode.utf16LeToUtf8(&name_buf, name_wchars) catch {
-                        if (info.NextEntryOffset == 0) break;
-                        offset += info.NextEntryOffset;
-                        continue;
-                    };
-                    var full_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const full_path = std.fmt.bufPrint(&full_buf, "{s}\\{s}", .{ w.path, name_buf[0..name_len] }) catch {
-                        if (info.NextEntryOffset == 0) break;
-                        offset += info.NextEntryOffset;
-                        continue;
-                    };
-                    if (info.Action == FILE_ACTION_RENAMED_OLD_NAME) {
-                        // Path is gone; resolve type from cache before it is evicted.
-                        const cached = path_types.fetchRemove(full_path);
-                        const ot: ObjectType = if (cached) |kv| blk: {
-                            allocator.free(kv.key);
-                            break :blk kv.value;
-                        } else .unknown;
-                        var pr: @TypeOf(pending_rename.?) = undefined;
-                        @memcpy(pr.path_buf[0..full_path.len], full_path);
-                        pr.path_len = full_path.len;
-                        pr.object_type = ot;
-                        pending_rename = pr;
-                        if (info.NextEntryOffset == 0) break;
-                        offset += info.NextEntryOffset;
-                        continue;
-                    }
-                    if (info.Action == FILE_ACTION_RENAMED_NEW_NAME) {
-                        if (pending_rename) |pr| {
-                            const src = pr.path_buf[0..pr.path_len];
-                            // Cache the new path so future delete/rename events can
-                            // resolve its type (OLD_NAME removed it from the cache).
-                            if (pr.object_type != .unknown) cache_new: {
-                                const gop = path_types.getOrPut(allocator, full_path) catch break :cache_new;
-                                if (!gop.found_existing) {
-                                    gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
-                                        _ = path_types.remove(full_path);
-                                        break :cache_new;
-                                    };
-                                }
-                                gop.value_ptr.* = pr.object_type;
-                            }
-                            // For dirs, also scan children into cache.
-                            if (pr.object_type == .dir)
-                                scan_path_types_into(allocator, io, path_types, full_path);
-                            const next_entry_offset = info.NextEntryOffset;
-                            watches_mutex.unlock(io);
-                            handler.rename(src, full_path, pr.object_type) catch |e| {
-                                std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
-                                watches_mutex.lockUncancelable(io);
-                                pending_rename = null;
-                                break;
-                            };
-                            watches_mutex.lockUncancelable(io);
-                            pending_rename = null;
-                            if (next_entry_offset == 0) break;
-                            offset += next_entry_offset;
-                            continue;
-                        }
-                        // Unpaired NEW_NAME: path moved into the watched tree from
-                        // outside. Fall through as .created, matching INotify.
-                    }
-                    const event_type: EventType = switch (info.Action) {
-                        FILE_ACTION_ADDED => .created,
-                        FILE_ACTION_REMOVED => .deleted,
-                        FILE_ACTION_MODIFIED => .modified,
-                        FILE_ACTION_RENAMED_NEW_NAME => .created, // unpaired: moved in from outside
-                        else => {
-                            if (info.NextEntryOffset == 0) break;
-                            offset += info.NextEntryOffset;
-                            continue;
-                        },
-                    };
-                    // Determine object_type: try GetFileAttributesW; cache result.
-                    // For deleted paths the path no longer exists at event time so
-                    // GetFileAttributesW would fail; use the cached type instead.
-                    const object_type: ObjectType = if (event_type == .deleted) blk: {
-                        const cached = path_types.fetchRemove(full_path);
-                        break :blk if (cached) |kv| blk2: {
-                            allocator.free(kv.key);
-                            break :blk2 kv.value;
-                        } else .unknown;
-                    } else blk: {
-                        var full_path_w: [std.fs.max_path_bytes]windows.WCHAR = undefined;
-                        const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk .unknown;
-                        full_path_w[len] = 0;
-                        const attrs = win32.GetFileAttributesW(full_path_w[0..len :0]);
-                        const INVALID: windows.DWORD = 0xFFFFFFFF;
-                        const FILE_ATTRIBUTE_DIRECTORY: windows.DWORD = 0x10;
-                        const ot: ObjectType = if (attrs == INVALID) .unknown else if (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) .dir else .file;
-                        if (ot != .unknown) {
-                            const gop = path_types.getOrPut(allocator, full_path) catch break :blk ot;
+        if (ok != .FALSE and bytes > 0) {
+            var offset: usize = 0;
+            // FILE_ACTION_RENAMED_OLD_NAME is always immediately followed by
+            // FILE_ACTION_RENAMED_NEW_NAME in the same RDCW buffer. Stash the
+            // src path here and emit a single handler.rename(src, dst) on NEW.
+            var pending_rename: ?struct {
+                path_buf: [std.fs.max_path_bytes]u8,
+                path_len: usize,
+                object_type: ObjectType,
+            } = null;
+            while (offset < bytes) {
+                const info: *FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(w.buf[offset..].ptr));
+                const name_wchars = (&info.FileName).ptr[0 .. info.FileNameLength / 2];
+                var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const name_len = std.unicode.utf16LeToUtf8(&name_buf, name_wchars) catch {
+                    if (info.NextEntryOffset == 0) break;
+                    offset += info.NextEntryOffset;
+                    continue;
+                };
+                var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const full_path = std.fmt.bufPrint(&full_buf, "{s}\\{s}", .{ w.path, name_buf[0..name_len] }) catch {
+                    if (info.NextEntryOffset == 0) break;
+                    offset += info.NextEntryOffset;
+                    continue;
+                };
+                if (info.Action == FILE_ACTION_RENAMED_OLD_NAME) {
+                    // Path is gone; resolve type from cache before it is evicted.
+                    const cached = path_types.fetchRemove(full_path);
+                    const ot: ObjectType = if (cached) |kv| blk: {
+                        allocator.free(kv.key);
+                        break :blk kv.value;
+                    } else .unknown;
+                    var pr: @TypeOf(pending_rename.?) = undefined;
+                    @memcpy(pr.path_buf[0..full_path.len], full_path);
+                    pr.path_len = full_path.len;
+                    pr.object_type = ot;
+                    pending_rename = pr;
+                    if (info.NextEntryOffset == 0) break;
+                    offset += info.NextEntryOffset;
+                    continue;
+                }
+                if (info.Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                    if (pending_rename) |pr| {
+                        const src = pr.path_buf[0..pr.path_len];
+                        // Cache the new path so future delete/rename events can
+                        // resolve its type (OLD_NAME removed it from the cache).
+                        if (pr.object_type != .unknown) cache_new: {
+                            const gop = path_types.getOrPut(allocator, full_path) catch break :cache_new;
                             if (!gop.found_existing) {
                                 gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
                                     _ = path_types.remove(full_path);
-                                    break :blk ot;
+                                    break :cache_new;
                                 };
                             }
-                            gop.value_ptr.* = ot;
+                            gop.value_ptr.* = pr.object_type;
                         }
-                        // A directory that appears via move-in carries existing children
-                        // that will never generate FILE_ACTION_ADDED events. Scan its
-                        // contents into the cache so subsequent deletes resolve their
-                        // type. Scanning a genuinely new (empty) directory is a no-op.
-                        if (ot == .dir and event_type == .created)
+                        // For dirs, also scan children into cache.
+                        if (pr.object_type == .dir)
                             scan_path_types_into(allocator, io, path_types, full_path);
-                        break :blk ot;
-                    };
-                    // Suppress FILE_ACTION_MODIFIED on directories: these are
-                    // parent-directory mtime side-effects of child operations
-                    // (delete, rename) and are not emitted by any other backend.
-                    if (event_type == .modified and object_type == .dir) {
+                        const next_entry_offset = info.NextEntryOffset;
+                        watches_mutex.unlock(io);
+                        handler.rename(src, full_path, pr.object_type) catch |e| {
+                            std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                            watches_mutex.lockUncancelable(io);
+                            pending_rename = null;
+                            break;
+                        };
+                        watches_mutex.lockUncancelable(io);
+                        pending_rename = null;
+                        if (next_entry_offset == 0) break;
+                        offset += next_entry_offset;
+                        continue;
+                    }
+                    // Unpaired NEW_NAME: path moved into the watched tree from
+                    // outside. Fall through as .created, matching INotify.
+                }
+                const event_type: EventType = switch (info.Action) {
+                    FILE_ACTION_ADDED => .created,
+                    FILE_ACTION_REMOVED => .deleted,
+                    FILE_ACTION_MODIFIED => .modified,
+                    FILE_ACTION_RENAMED_NEW_NAME => .created, // unpaired: moved in from outside
+                    else => {
                         if (info.NextEntryOffset == 0) break;
                         offset += info.NextEntryOffset;
                         continue;
+                    },
+                };
+                // Determine object_type: try GetFileAttributesW; cache result.
+                // For deleted paths the path no longer exists at event time so
+                // GetFileAttributesW would fail; use the cached type instead.
+                const object_type: ObjectType = if (event_type == .deleted) blk: {
+                    const cached = path_types.fetchRemove(full_path);
+                    break :blk if (cached) |kv| blk2: {
+                        allocator.free(kv.key);
+                        break :blk2 kv.value;
+                    } else .unknown;
+                } else blk: {
+                    var full_path_w: [std.fs.max_path_bytes]windows.WCHAR = undefined;
+                    const len = std.unicode.utf8ToUtf16Le(&full_path_w, full_path) catch break :blk .unknown;
+                    full_path_w[len] = 0;
+                    const attrs = win32.GetFileAttributesW(full_path_w[0..len :0]);
+                    const INVALID: windows.DWORD = 0xFFFFFFFF;
+                    const FILE_ATTRIBUTE_DIRECTORY: windows.DWORD = 0x10;
+                    const ot: ObjectType = if (attrs == INVALID) .unknown else if (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) .dir else .file;
+                    if (ot != .unknown) {
+                        const gop = path_types.getOrPut(allocator, full_path) catch break :blk ot;
+                        if (!gop.found_existing) {
+                            gop.key_ptr.* = allocator.dupe(u8, full_path) catch {
+                                _ = path_types.remove(full_path);
+                                break :blk ot;
+                            };
+                        }
+                        gop.value_ptr.* = ot;
                     }
-                    // Capture next_entry_offset before releasing the mutex: after unlock,
-                    // the main thread may call remove_watch() which frees w.buf, making
-                    // the `info` pointer (which points into w.buf) a dangling reference.
-                    const next_entry_offset = info.NextEntryOffset;
-                    watches_mutex.unlock(io);
-                    handler.change(full_path, event_type, object_type) catch |e| {
+                    // A directory that appears via move-in carries existing children
+                    // that will never generate FILE_ACTION_ADDED events. Scan its
+                    // contents into the cache so subsequent deletes resolve their
+                    // type. Scanning a genuinely new (empty) directory is a no-op.
+                    if (ot == .dir and event_type == .created)
+                        scan_path_types_into(allocator, io, path_types, full_path);
+                    break :blk ot;
+                };
+                // Suppress FILE_ACTION_MODIFIED on directories: these are
+                // parent-directory mtime side-effects of child operations
+                // (delete, rename) and are not emitted by any other backend.
+                if (event_type == .modified and object_type == .dir) {
+                    if (info.NextEntryOffset == 0) break;
+                    offset += info.NextEntryOffset;
+                    continue;
+                }
+                // Capture next_entry_offset before releasing the mutex: after unlock,
+                // the main thread may call remove_watch() which frees w.buf, making
+                // the `info` pointer (which points into w.buf) a dangling reference.
+                const next_entry_offset = info.NextEntryOffset;
+                watches_mutex.unlock(io);
+                handler.change(full_path, event_type, object_type) catch |e| {
+                    std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
+                    watches_mutex.lockUncancelable(io);
+                    break;
+                };
+                if (event_type == .created and object_type == .dir) {
+                    emit_subtree_created(handler, io, full_path) catch |e| {
                         std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
                         watches_mutex.lockUncancelable(io);
                         break;
                     };
-                    if (event_type == .created and object_type == .dir) {
-                        emit_subtree_created(handler, io, full_path) catch |e| {
-                            std.log.err("nightwatch: handler returned {s}, stopping watch thread", .{@errorName(e)});
-                            watches_mutex.lockUncancelable(io);
-                            break;
-                        };
-                    }
-                    watches_mutex.lockUncancelable(io);
-                    if (next_entry_offset == 0) break;
-                    offset += next_entry_offset;
                 }
-                // Flush an unpaired OLD_NAME: path moved out of the watched tree.
-                // Emit as .deleted, matching INotify behaviour.
-                if (pending_rename) |pr| {
-                    const src = pr.path_buf[0..pr.path_len];
-                    watches_mutex.unlock(io);
-                    handler.change(src, .deleted, pr.object_type) catch {};
-                    watches_mutex.lockUncancelable(io);
-                }
+                watches_mutex.lockUncancelable(io);
+                if (next_entry_offset == 0) break;
+                offset += next_entry_offset;
             }
-            // Re-arm ReadDirectoryChangesW for the next batch.
-            w.overlapped = std.mem.zeroes(OVERLAPPED);
-            if (win32.ReadDirectoryChangesW(w.handle, w.buf.ptr, buf_size, .TRUE, notify_filter, null, &w.overlapped, null) == .FALSE)
-                std.log.err("nightwatch: ReadDirectoryChangesW re-arm failed for {s}, future events lost", .{entry.key_ptr.*});
-            break;
+            // Flush an unpaired OLD_NAME: path moved out of the watched tree.
+            // Emit as .deleted, matching INotify behaviour.
+            if (pending_rename) |pr| {
+                const src = pr.path_buf[0..pr.path_len];
+                watches_mutex.unlock(io);
+                handler.change(src, .deleted, pr.object_type) catch {};
+                watches_mutex.lockUncancelable(io);
+            }
+        }
+        // Re-arm ReadDirectoryChangesW for the next batch.
+        if (ok != .FALSE and !w.removed and w.arm()) {
+            watches_mutex.unlock(io);
+            continue;
+        }
+        if (w.removed) {
+            for (retired.items, 0..) |item, i| if (item == w) {
+                _ = retired.swapRemove(i);
+                break;
+            };
+        } else {
+            // The directory was deleted. Only this watch ended, so keep serving the others.
+            _ = watches.remove(w.path);
+            _ = win32.CloseHandle(w.handle);
+            watches_mutex.unlock(io);
+            handler.change(w.path, .deleted, .dir) catch |e|
+                std.log.err("nightwatch: handler returned {s}", .{@errorName(e)});
+            watches_mutex.lockUncancelable(io);
         }
         watches_mutex.unlock(io);
+        w.destroy(allocator);
     }
 }
 
@@ -374,8 +399,7 @@ pub fn add_watch(self: *@This(), allocator: std.mem.Allocator, path: []const u8)
     const w = try allocator.create(Watch);
     errdefer allocator.destroy(w);
     w.* = .{ .handle = handle, .buf = buf, .overlapped = std.mem.zeroes(OVERLAPPED), .path = owned_path };
-    if (win32.ReadDirectoryChangesW(handle, buf.ptr, buf_size, .TRUE, notify_filter, null, &w.overlapped, null) == .FALSE)
-        return error.WatchFailed;
+    if (!w.arm()) return error.WatchFailed;
     try self.watches.put(allocator, owned_path, w);
     // Seed path_types with pre-existing entries so delete/rename events for
     // paths that existed before this watch started can resolve their ObjectType.
@@ -440,9 +464,9 @@ pub fn remove_watch(self: *@This(), allocator: std.mem.Allocator, path: []const 
     defer self.watches_mutex.unlock(self.io);
     if (self.watches.fetchRemove(path)) |entry| {
         const w = entry.value;
+        // Closing the handle completes the pending read, and the thread then frees w.
+        self.retired.append(allocator, w) catch return;
+        w.removed = true;
         _ = win32.CloseHandle(w.handle);
-        allocator.free(w.path);
-        allocator.free(w.buf);
-        allocator.destroy(w);
     }
 }
